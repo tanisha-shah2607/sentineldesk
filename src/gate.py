@@ -8,6 +8,8 @@ decide(triage_out, hits, text) -> {
 
 Rules (any one fires -> escalate). Every rule is a pure function of its inputs.
   HIGH_INCIDENT     priority == high and type == Incident
+  SECURITY_INCIDENT ransomware, data leak/breach, hacked or compromised systems (en + de). The dataset
+                    rarely labels these urgent (breach 24%, ransomware 15% high), so triage alone misses them.
   LOW_CONFIDENCE    overall_conf < CONF_THRESHOLD
   NO_PRECEDENT      no hits, or top retrieval score < SIM_THRESHOLD
   UNSUPPORTED_ASK   ticket asks for a refund / compensation / price / guarantee / SLA credit and
@@ -83,6 +85,15 @@ LEGAL_PATTERN = re.compile(
     r"breach of contract|small claims|"
     r"anwalt|rechtsanwalt|klage\w*|verklagen|gericht\w*|rechtliche schritte|haftung\w*)\b", _F)
 
+# Security incidents (S1/S2 request). Deliberately narrow: bare "encrypt" / "verschlüssel" do NOT match,
+# because encryption questions are routine. "breach of contract" is LEGAL's job and "SLA breach" is an
+# SLA complaint, so both are excluded here.
+SECURITY_PATTERN = re.compile(
+    r"\b(ransom\w*|files? (?:are|were|got|have been) encrypted|encrypted (?:my|our|all) files|"
+    r"data (?:leak\w*|breach\w*)|(?<!sla )breach(?:ed|es)?\b(?! of contract)|hacked|compromised|"
+    r"datenleck\w*|datenpanne\w*|erpress\w*|l(?:ö|oe)segeld\w*|gehackt\w*|sicherheitsvorfall\w*|"
+    r"(?:dateien|daten) (?:sind|wurden) (?:\w+ ){0,2}verschl(?:ü|ue)sselt)", _F)
+
 INJECTION_PATTERN = re.compile(
     r"(ignore (all |any )?(the )?(previous|prior|above|earlier) (instructions|prompts?|rules)|"
     r"disregard (all |any )?(the )?(previous|prior|above|your) (instructions|rules)|"
@@ -98,6 +109,13 @@ INJECTION_PATTERN = re.compile(
 def rule_high_incident(tri: dict):
     if str(tri.get("priority", "")).lower() == "high" and str(tri.get("type", "")).lower() == "incident":
         return "HIGH_INCIDENT", "High-priority Incident: immediate on-call escalation"
+    return None
+
+
+def rule_security_incident(text: str):
+    m = SECURITY_PATTERN.search(text)
+    if m:
+        return "SECURITY_INCIDENT", f"Possible security incident (\"{m.group(0)}\"): immediate on-call escalation"
     return None
 
 
@@ -171,6 +189,7 @@ def decide(triage_out: dict, hits: list[dict], text: str) -> dict:
     text = text if isinstance(text, str) else ""
     fired = [r for r in (
         rule_high_incident(tri),
+        rule_security_incident(text),
         rule_empty(text),
         rule_unreadable(text),
         rule_prompt_injection(text),

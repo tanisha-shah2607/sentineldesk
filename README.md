@@ -308,6 +308,7 @@ of any of top 5 is 0.99 either way. The dense (e5) retriever should beat the nev
 | Code | Fires when | Notes |
 |---|---|---|
 | `HIGH_INCIDENT` | predicted `priority == high` and `type == Incident` | the brief's mandatory rule |
+| `SECURITY_INCIDENT` | ransomware / ransom note, files encrypted by an attacker, data leak or breach, hacked or compromised systems (en + de: *Datenleck*, *Datenpanne*, *Lösegeld*, *gehackt*, *Sicherheitsvorfall*, *Dateien wurden verschlüsselt*) | the dataset rarely labels these urgent, so triage misses them. Narrow on purpose: bare "encrypt"/"verschlüssel" questions, "breach of contract" (`LEGAL`) and "SLA breach" don't match. On val: matches 6.7% of tickets (55% already escalated), +3.0 pts escalation, Incident+high escalated 0.912 → 0.922 |
 | `LOW_CONFIDENCE` | `overall_conf < CONF_THRESHOLD` | threshold in `config.py`, tuned on the `val` slice |
 | `NO_PRECEDENT` | no hits, or top similarity `< SIM_THRESHOLD` (0.85) | 0.85 comes from S3's `scripts/tune_threshold.py`: e5 scores sit in ~0.75-0.95, and 0.85 flags no hand-typed in-scope ticket while catching 12/17 off-topic ones |
 | `UNSUPPORTED_ASK` | ticket asks for a refund/compensation, a price/discount, or a guarantee/SLA, and no retrieved answer covers that topic | en + de keyword patterns |
