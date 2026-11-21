@@ -24,8 +24,11 @@ Do not `pip freeze > requirements.txt` in PowerShell (writes UTF-16). Edit requi
 | `src/pipeline.py`, `app.py`, `burst.py` | S5 | `run_ticket(subject, body)` |
 
 Return shapes are documented at the top of each module; every stub already returns them, so the app runs from minute one.
-- `triage` -> `{language, type, queue, priority, conf:{type,queue,priority}, overall_conf}`; `overall_conf = min(three confs)`;
-  the gate compares it to `CONF_THRESHOLD`; priority conf is the calibrated probability before any recall-tuned threshold.
+- `triage` -> `{language, type, queue, priority, conf:{type,queue,priority}, overall_conf}`; `overall_conf = min(type conf, queue conf)`
+  (priority excluded; high+Incident still escalates); the gate compares it to `CONF_THRESHOLD`; `conf.priority` is the probability
+  of the label output, after the recall-tuned threshold.
+- `build_text` / `unescape` (src/text.py) turn literal `\n` escapes (21% of bodies, 3% of answers) into real line breaks.
+  Use `unescape(answer)` before showing or prompting with an answer.
 - `retrieve` -> `[{ticket_id, score, subject, answer, snippet, queue, type, language}]`
 - `decide` -> `{escalate, reasons}`; `draft_reply` -> `{text, cited_ids, warnings, used_fallback}`
 - `run_ticket` -> `{triage, hits, gate, draft(+for_review), latency}`; latency keys (ms): `triage_ms, retrieve_ms, gate_ms, generate_ms, total_ms`

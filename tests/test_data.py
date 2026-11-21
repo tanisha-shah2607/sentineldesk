@@ -66,3 +66,10 @@ def test_shared_val_slice():
     assert len(tr) + len(va) == len(al)
     assert 0.08 < len(va) / len(al) < 0.12
     assert load_kb("val").ticket_id.tolist() == va.ticket_id.tolist()  # deterministic
+
+
+def test_literal_backslash_n_unescaped():
+    from src.text import unescape
+    t = build_text("Hallo", "Sehr geehrt,\n\nich schreibe")
+    assert "\n" not in t and "\n\nich" in t
+    assert unescape(None) == "" and unescape("a\nb") == "a\nb"
