@@ -9,14 +9,15 @@ Leakage rule: the holdout's answer/queue/type/priority must never reach inferenc
 from __future__ import annotations
 
 import hashlib
+import os
 
 import pandas as pd
 
 from . import config as C
-from .text import build_text  # re-exported: `from src.data import build_text` still works
+from .text import build_text, unescape  # re-exported: `from src.data import build_text` still works
 
 __all__ = ["build_text", "make_split", "load_kb", "load_kb_clean", "clean_mask", "val_mask",
-           "load_test_inputs", "load_test_labels"]
+           "norm_body", "holdout_seen_ids", "load_test_inputs", "load_test_labels"]
 
 
 def _fingerprint(df: pd.DataFrame) -> str:
@@ -26,13 +27,36 @@ def _fingerprint(df: pd.DataFrame) -> str:
     return h.hexdigest()[:16]
 
 
+def _load_from_csv_files() -> pd.DataFrame:
+    """Fallback when the `datasets` library is unavailable (e.g. blocked on some Windows laptops):
+    download the repo's CSV files over plain HTTPS and concatenate them in alphabetical order.
+    This is what load_dataset does, so the result (and the fingerprint) is identical."""
+    import requests
+    api = requests.get(f"https://huggingface.co/api/datasets/{C.HF_DATASET}", timeout=60)
+    api.raise_for_status()
+    names = sorted(s["rfilename"] for s in api.json()["siblings"] if s["rfilename"].endswith(".csv"))
+    if not names:
+        raise RuntimeError("no CSV files found in the dataset repo")
+    print(f"downloading CSVs: {names}")
+    base = f"https://huggingface.co/datasets/{C.HF_DATASET}/resolve/main/"
+    return pd.concat([pd.read_csv(base + n) for n in names], ignore_index=True)
+
+
+def _load_raw(csv_path: str | None = None) -> pd.DataFrame:
+    if csv_path:
+        return pd.read_csv(csv_path)
+    if os.getenv("SENTINEL_FORCE_CSV") != "1":
+        try:
+            from datasets import load_dataset
+            return load_dataset(C.HF_DATASET)["train"].to_pandas()
+        except Exception as e:  # noqa: BLE001
+            print(f"load_dataset failed ({type(e).__name__}); falling back to plain CSV download")
+    return _load_from_csv_files()
+
+
 def make_split(csv_path: str | None = None, allow_mismatch: bool = False) -> None:
     """Create the locked 80/20 split exactly as the challenge brief specifies."""
-    if csv_path:
-        df = pd.read_csv(csv_path)
-    else:
-        from datasets import load_dataset
-        df = load_dataset(C.HF_DATASET)["train"].to_pandas()
+    df = _load_raw(csv_path)
 
     n_raw = len(df)
     df = df.sample(frac=1.0, random_state=C.SEED).reset_index(drop=True)
@@ -89,6 +113,22 @@ def load_kb_clean(need_answer: bool = False, part: str = "all") -> pd.DataFrame:
     """KB rows to TRAIN on (need_answer=False) or INDEX for RAG (need_answer=True)."""
     kb = load_kb(part)
     return kb[clean_mask(kb, need_answer)].reset_index(drop=True)
+
+
+def norm_body(body: pd.Series) -> pd.Series:
+    """Duplicate-detection key: unescaped, whitespace-collapsed, lowercased body
+    (same definition as src/retrieval.py's _norm_body)."""
+    return body.map(unescape).str.replace(r"\s+", " ", regex=True).str.strip().str.lower()
+
+
+def holdout_seen_ids() -> set[str]:
+    """ticket_ids of holdout tickets whose body has an exact copy (a 'twin') in the clean KB.
+    ~27% of clean holdout tickets are twins, and twins share their labels ~99.7% of the time, so
+    scores on them are inflated: evaluate.py also reports the never-seen remainder.
+    Uses only holdout INPUTS and the KB, never holdout labels."""
+    kb_keys = set(norm_body(load_kb_clean()["body"]))
+    te = load_test_inputs()
+    return set(te.loc[norm_body(te["body"]).isin(kb_keys), "ticket_id"])
 
 
 def load_test_inputs() -> pd.DataFrame:

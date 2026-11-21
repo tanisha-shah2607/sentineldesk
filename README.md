@@ -9,6 +9,7 @@ python -m venv .venv
 pip install -r requirements.txt
 copy .env.example .env          # then fill in LLM settings (S4)
 python scripts/make_split.py    # prints row count + fingerprint; aborts if your dataset differs from the team's
+python scripts/train_triage.py  # triage classifier (~1.5 min) -> models/triage.joblib, prints validation metrics
 python scripts/build_index.py   # embeds the KB once into index/ (~2 min on Apple GPU, longer on CPU)
 pytest
 ```
@@ -25,9 +26,10 @@ Do not `pip freeze > requirements.txt` in PowerShell (writes UTF-16). Edit requi
 | `src/pipeline.py`, `app.py`, `burst.py` | S5 | `run_ticket(subject, body)` |
 
 Return shapes are documented at the top of each module; every stub already returns them, so the app runs from minute one.
-- `triage` -> `{language, type, queue, priority, conf:{type,queue,priority}, overall_conf}`; `overall_conf = min(type conf, queue conf)`
+- `triage` -> `{language, type, queue, priority, conf:{type,queue,priority}, overall_conf, outage_terms}`; `overall_conf = min(type conf, queue conf)`
   (priority excluded; high+Incident still escalates); the gate compares it to `CONF_THRESHOLD`; `conf.priority` is the probability
-  of the label output, after the recall-tuned threshold.
+  of the label output, after the recall-tuned threshold and the outage rule. `outage_terms` lists outage wording found
+  (e.g. `["vpn down"]`, empty if none), usable as the escalation reason.
 - `build_text` / `unescape` (src/text.py) turn literal `\n` escapes (21% of bodies, 3% of answers) into real line breaks.
   Use `unescape(answer)` before showing or prompting with an answer.
 - `retrieve` -> `[{ticket_id, score, subject, answer, snippet, queue, type, language}]`, sorted by score; `[]` for empty text.
@@ -50,6 +52,72 @@ Return shapes are documented at the top of each module; every stub already retur
   The final app index and final models may use `part="all"`.
 - 8.7% of subjects are null: always build input with `src.text.build_text()`.
 - Clean-row language mix: en 22,561 / de 16,258.
+
+## Triage classifier (S2)
+`triage(subject, body)` returns language, type, queue, priority, calibrated confidences and `outage_terms` in about 2 ms.
+Each machine trains its own model once with `python scripts/train_triage.py`, so scikit-learn versions never clash on load.
+Without `models/triage.joblib`, `triage()` returns placeholder labels with a warning, so contract tests run anywhere.
+
+**How it works** (`src/triage_model.py`, shared by training and `triage()`)
+- Input is `build_text(subject, body)`. One TF-IDF over word 1-2 grams (sublinear tf, min_df 2) feeds three logistic-regression
+  heads (type, queue, priority) with `class_weight="balanced"`, since Macro-F1 counts small classes as much as big ones.
+  Character 3-5 grams were tried and dropped: no better on val (type 0.895 vs 0.889, queue 0.682 vs 0.675, priority 0.714 vs 0.720)
+  at about 8x the feature volume.
+- Regularisation `C`: type 32, queue 16, priority 16, picked on val from {1, 4, 16, 32, 64, 128}; scores rise steeply up to 16, then flatten.
+- Calibration: temperature scaling per head on val (one number per head; predictions unchanged). Expected calibration error,
+  before -> after: type 0.030 -> 0.014, queue 0.079 -> 0.040, priority 0.031 -> 0.028.
+- Priority bar: "high" when calibrated P(high) >= 0.31, not only when it is the most likely label.
+- Outage rule: clear outage wording makes a ticket Incident + high (`OUTAGE_PATTERN`: "outage", "VPN/server/login ... down",
+  "has been down", "offline", "unreachable", "ausgefallen/Ausfall", "nicht (mehr) erreichbar", "Cyberangriff"). Each marks a
+  high-priority Incident in roughly half or more of the training tickets that use it (base rate 17%). Weak signals ("breach" 24%,
+  "not working" 15%) are left out, and so is "crash" (45%, but common in ordinary app-crash tickets). Only 3 training tickets
+  describe a VPN outage, so without the rule the English hospital VPN ticket came out as Problem / medium.
+- The bar and the rule share one budget, set on val: the lowest bar that keeps priority Macro-F1 within 2 points of the model alone.
+- Each confidence is the calibrated probability of the label actually output, so a "high" set by the bar or the rule can show a
+  low `conf.priority`. `overall_conf = min(conf.type, conf.queue)`.
+- Language: langdetect loaded with only its English and German profiles and a fixed seed, run on the raw subject + body without
+  the "[no subject]" placeholder (those English words tipped short German tickets to English). The dataset's `language` label is
+  wrong on ~11% of KB tickets: 4,236 labelled `de` are written in English, and so are their answers. Against the real language,
+  the detector disagrees on about 20 of 38,810 tickets. Use `triage()["language"]`, not the label.
+
+**Validation results** (34,955 train / 3,864 val tickets from the shared slice; `C`, temperatures, bar and rule were all tuned on val)
+
+25.8% of val tickets have exactly the same body (and labels) as a training ticket, and the model gets those ~99% right. The
+never-seen column (2,869 tickets) is closer to what new tickets will see. The holdout probably contains the same kind of copies.
+
+| | all val | never-seen |
+|---|---|---|
+| type Macro-F1 | 0.884 | 0.848 |
+| queue Macro-F1 | 0.683 | 0.565 |
+| priority Macro-F1 | 0.696 | 0.593 |
+| High-Priority Incident Recall (triage predicts Incident + high) | 0.812 | 0.753 |
+| ... counting low-confidence escalation (`overall_conf` < 0.50) | 0.909 | 0.879 |
+
+Model alone (most likely label, no bar, no rule): recall 0.738 / 0.656, priority Macro-F1 0.714 / 0.613.
+
+`overall_conf` against routing accuracy (type and queue both right), all val:
+
+| `overall_conf` | below 0.3 | 0.3-0.5 | 0.5-0.7 | 0.7-0.9 | 0.9 and up |
+|---|---|---|---|---|---|
+| share of tickets | 4% | 25% | 27% | 30% | 14% |
+| routing right | 15% | 31% | 54% | 86% | 98% |
+
+So `CONF_THRESHOLD = 0.50` sends 29% of tickets to a human, and the model's routing is right on only 28% of those.
+
+Speed: 1.9 ms per ticket (p95 2.9 ms); `triage_batch` 0.9 ms per ticket, so the full clean holdout takes about 10 s.
+The model file is 10 MB and loads in about 3 s.
+
+**Leakage**: `scripts/train_triage.py` reads only `load_kb_clean(part="train")` and `load_kb_clean(part="val")`, never the holdout
+files, and every threshold is tuned on val. `scripts/leakage_audit.py` passes with `models/triage.joblib` present.
+
+**Known limits**
+- The labels come from a synthetic dataset and the model learns its conventions; for example, pricing questions go to Billing and
+  Payments, as 46% of training tickets mentioning prices do.
+- Queue is the weakest label: General Inquiry 0.57, Product Support 0.64, Customer Service 0.65 F1 (model alone, val).
+- Hand-written tickets unlike the dataset are harder; the English hospital VPN ticket still routes to Customer Service (the rule
+  fixes type and priority, not the department).
+- The lower bar labels many unusual inputs (prompt injections, garbage) "high". Those then escalate, which is the safe side.
+- Two-word English tickets with no telltale word ("Printer broken") can be detected as German.
 
 ## Retrieval (S3)
 Finds the 5 most similar resolved tickets in the historical KB, for the gate (is there a real precedent?) and the reply
@@ -150,6 +218,18 @@ C. Generation: `run_ticket` on a stated sample (`--n-gen`, default 50): citation
 
 **High-Priority Incident Recall** (headline): of holdout tickets whose true label is Incident + high, the fraction the system
 escalates to a human. We also report the classifier version: the fraction for which triage predicts both labels correctly.
+
+**Duplicates (important for honest numbers).** The three source CSVs overlap (the 20k file is another version of the big file),
+so the same ticket can appear on both sides of the split. 21.8% of all holdout bodies, and **27.5% of clean holdout tickets**,
+have an exact-body twin in the KB (`data.holdout_seen_ids()`), and twins share their type/queue/priority labels 99.6-99.8% of
+the time. Likewise 25.8% of val tickets have a twin in train. So every stage A/B metric is reported three ways by `evaluate.py`:
+`all_*` (the brief's headline), `never_seen_*` (holdout tickets with no twin in the KB; the fair estimate for genuinely new
+tickets), and Macro-F1 by **detected** language (`detected_en_*`, `detected_de_*`). The dataset's `language` column is wrong on
+~11% of tickets, so never group or filter by it. When presenting, lead with `never_seen_*` and show `all_*` next to it.
+
+`scripts/make_split.py` falls back to downloading the repo's CSV files over plain HTTPS if the `datasets` library fails
+(or force it with `SENTINEL_FORCE_CSV=1`); the pinned fingerprint check guarantees the same split either way.
+Windows machines where pyarrow's DLL is blocked need `fastparquet` (in requirements.txt).
 
 ## Checks to run before merging your module / before the demo
 - `python scripts/run_adversarial.py`: 20 tricky tickets in `eval/adversarial.json` (empty subject, prompt injection,
