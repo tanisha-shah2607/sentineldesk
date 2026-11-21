@@ -110,7 +110,40 @@ def test_index_has_no_duplicate_bodies():
     ids = [r["ticket_id"] for r in _load("all")[1]]
     norm = _norm_body(kb.set_index("ticket_id").loc[ids, "body"])
     assert len(ids) == len(set(ids)) and not norm.duplicated().any()
-    assert len(ids) == _norm_body(kb["body"]).nunique()
+    # one ticket per distinct body among tickets with a real (non-generic) answer
+    from src.retrieval import is_generic_answer
+    informative = kb[~kb["answer"].map(is_generic_answer)]
+    assert len(ids) == _norm_body(informative["body"]).nunique()
+
+
+def test_generic_answer_detection():
+    from src.retrieval import is_generic_answer
+    generic = [
+        "call", "Sorry", "send guide", "Bald anrufen",
+        "To better assist you, could you please provide more details about the issue you are facing?",
+        "I will address the issue and call you back at <tel_num> shortly to discuss further details",
+        "Bitte geben Sie weitere Details und kontaktieren Sie uns zu einer guten Zeit für einen Rückruf.",
+        "Please review the integration requirements and contact us at <tel_num> for a discussion.",
+        None, "",
+    ]
+    real = [
+        "Ersetzen Sie den beschädigten MicroSD-Speicher, um die Verbindungsprobleme zu beheben.",
+        "Wir bieten die Integration von QuickBooks Online an und stellen Anleitungen und APIs auf unserer "
+        "Unterstützungskennseite zur Verfügung.",
+        "Please reset your password via the self-service portal, clear the browser cache and sign in again. "
+        "If the link has expired, request a new one; links are valid for 24 hours. Contact us if it still fails.",
+    ]
+    assert all(is_generic_answer(a) for a in generic)
+    assert not any(is_generic_answer(a) for a in real)
+
+
+@needs_index
+def test_index_has_no_generic_answers():
+    from src.retrieval import is_generic_answer
+    recs = _load("all")[1]
+    ids = {r["ticket_id"] for r in recs}
+    assert "TKT-07586" not in ids and "TKT-33547" not in ids     # the two hubs that prompted the filter
+    assert not any(is_generic_answer(r["answer"]) for r in recs)
 
 
 @needs_index
