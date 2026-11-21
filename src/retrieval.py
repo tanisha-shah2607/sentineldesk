@@ -8,7 +8,7 @@ a few ms per query, so nothing is lost.
 retrieve(text, k=5, part="all", xl_slots=None) -> [{
   "ticket_id": "TKT-00012", "score": float (cosine; e5 scores sit in a narrow high band, ~0.75-0.95),
   "subject": str, "answer": str, "snippet": str (answer[:300]),
-  "queue": str, "type": str, "language": str
+  "queue": str, "type": str, "language": str ("en"|"de", DETECTED by src.triage, not the dataset label)
 }]  sorted by score desc; [] for empty text
 retrieve_batch(texts, k, part="all", xl_slots=None) -> [list_of_hits, ...]   (evaluate.py runs this on the full holdout)
 
@@ -167,10 +167,18 @@ def build_index(part: str = "all") -> dict:
     emb, meta = emb[sel], meta[sel].reset_index(drop=True)
     body = meta[["ticket_id"]].merge(kb, on="ticket_id", how="left")["body"]
     meta["_body"] = _norm_body(body).to_numpy()
+    meta["_raw_body"] = body.to_numpy()
 
     keep = _dedupe_positions(meta)
     emb = np.ascontiguousarray(emb[keep])
-    meta = meta.iloc[keep].drop(columns="_body").reset_index(drop=True)
+    meta = meta.iloc[keep].reset_index(drop=True)
+    # `language` = detected language (S2's detector), not the dataset label: the label is wrong on
+    # ~11% of KB tickets (26% of those labelled "de" are written in English). Used for the hits'
+    # `language` field and for the cross-lingual mix. ~9 s for the full index.
+    from .triage import detect_language, language_text
+    meta["language"] = [detect_language(language_text(s, b))
+                        for s, b in zip(meta["subject"], meta["_raw_body"])]
+    meta = meta.drop(columns=["_body", "_raw_body"])
 
     np.save(_vec_path(part), emb)
     meta.to_parquet(_meta_path(part), index=False)

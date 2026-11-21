@@ -3,6 +3,7 @@
 Usage: python scripts/cross_lingual.py   -> results/cross_lingual.json (results/ is gitignored)
 
 Leakage-safe: KB part="val" queries against the part="train" index; holdout never touched.
+Languages (queries and index) are DETECTED with src.triage, not the dataset label (wrong on ~11%).
 Val tickets with an exact body copy in train are excluded (they would match themselves).
 
 Three questions:
@@ -27,6 +28,7 @@ from src.config import RESULTS_DIR  # noqa: E402
 from src.data import load_kb_clean  # noqa: E402
 from src.retrieval import _load, _norm_body, _top_k, embed_texts, retrieve_batch  # noqa: E402
 from src.text import build_text  # noqa: E402
+from src.triage import detect_language, language_text  # noqa: E402
 
 PAIRS = [  # (subject_en, body_en, subject_de, body_de) written for this check
     ("VPN down", "Our site-to-site VPN is down since this morning. Remote staff cannot reach the hospital EMR system.",
@@ -64,7 +66,9 @@ def main() -> None:
     train_bodies = set(_norm_body(kb_train[kb_train.ticket_id.isin(train_ids)]["body"]))
     val = val[~_norm_body(val["body"]).isin(train_bodies).to_numpy()].reset_index(drop=True)
     q = embed_texts([build_text(s, b) for s, b in zip(val["subject"], val["body"])])
-    v_lang, v_queue, v_type = val["language"].to_numpy(), val["queue"].to_numpy(), val["type"].to_numpy()
+    # Query language = DETECTED language (the dataset label is wrong on ~11% of tickets).
+    v_lang = np.array([detect_language(language_text(s, b)) for s, b in zip(val["subject"], val["body"])])
+    v_queue, v_type = val["queue"].to_numpy(), val["type"].to_numpy()
 
     def search(mask):
         sub = np.flatnonzero(mask)

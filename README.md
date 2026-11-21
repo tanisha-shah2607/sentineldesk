@@ -145,7 +145,10 @@ e5 needs the `query: ` / `passage: ` prefixes, which `embed_texts()` adds.
 - Two indexes from one embedding cache: `part="all"` (33,426) for the app and evaluation, and `part="train"` (30,607) for
   tuning on the validation slice, so a val ticket can never retrieve itself.
 - Cache key = model name + hash of `src/text.py`. If `build_text()` changes, the cache is detected as stale and rebuilt
-  instead of silently mismatching query-time text.
+  instead of silently mismatching query-time text. So after any edit to `src/text.py`, run `python scripts/build_index.py`
+  again (it re-embeds automatically; ~2 min on Apple GPU).
+- Each hit's `language` is the **detected** language (S2's detector in `src/triage.py`), not the dataset label: 3,558 of
+  the 13,834 index tickets labelled `de` (26%) are written in English. All per-language figures below use detected language.
 
 **Search: exact cosine similarity in NumPy, not FAISS.** Vectors are L2-normalised, so a dot product is the cosine;
 this gives exactly the results of `faiss.IndexFlatIP`. FAISS was dropped because on macOS its wheel and PyTorch's wheel each
@@ -153,8 +156,9 @@ bundle `libomp`, and the process aborts (`OMP: Error #15`) once both are loaded.
 
 **Cross-lingual precedents (bonus).** e5 gives same-language tickets a small score bonus (~0.02-0.03), and because its scores
 sit in a narrow band, that bonus decides the ranking: the same ticket written in English and German shared on average 0.1
-of its 5 hits, even though the two query vectors are very close (cosine 0.93). Yet for German tickets the best *English*
-precedents are as useful as German ones (top-1 queue match 57.5% English-only vs 53.2% German-only). So `retrieve()` keeps
+of its 5 hits, even though the two query vectors are very close (cosine 0.93), and only 19% of German tickets got any
+English hit in their top 5. Yet for German tickets the best *English* precedents are at least as useful as German ones
+(top-1 queue match 56.8% English-only vs 51.6% German-only). So `retrieve()` keeps
 the 3 best hits overall and gives the last 2 slots (`CROSS_LINGUAL_SLOTS`, default 2) to the best tickets in the language
 missing from those 3. Hits stay sorted by their real score, so the top hit, and with it the gate's `SIM_THRESHOLD`, never
 changes. The reply is still written in the ticket's language. Set `CROSS_LINGUAL_SLOTS=0` to turn it off.
@@ -165,10 +169,12 @@ Example: a German hospital VPN outage now also retrieves TKT-26021 "Severe Servi
 
 | | Top-1 queue | Queue in top 5 | Type in top 5 | Has a hit in the other language |
 |---|---|---|---|---|
-| All, without cross-lingual mix | 68.4% | 85.6% | 97.3% | 36% |
-| **All, with mix (default)** | **68.4%** | **88.3%** | **98.2%** | **100%** |
-| English (n=1,712), with mix | 74.6% | 89.6% | 98.5% | 100% |
-| German (n=1,157), with mix | 59.1% | 86.3% | 97.8% | 100% |
+| All, without cross-lingual mix | 68.4% | 85.6% | 97.3% | 12% |
+| **All, with mix (default)** | **68.4%** | **88.5%** | **97.9%** | **100%** |
+| English (n=2,015), with mix | 73.7% | 89.6% | 98.1% | 100% |
+| German (n=854), with mix | 56.0% | 85.8% | 97.5% | 100% |
+
+The mix helps German tickets most: queue in top 5 rises from 79.9% to 85.8% (English: 88.1% to 89.6%).
 
 Including the 995 val tickets that do have a copy in train raises top-1 queue match to 76.1%; that gap is the copies, not
 better retrieval, so we quote the lower number. Higher scores mean better precedents: top-1 queue match rises from 43% in
@@ -204,7 +210,7 @@ then CPU; override with `EMBED_DEVICE`). Call `warmup()` at app start so the fir
 would be slow on CPU); download the e5 weights (~1.1 GB) during the Docker build; give the service at least 4 GiB of memory.
 
 **Limitations**
-- German is weaker than English (top-1 queue 59.1% vs 74.6%).
+- German is weaker than English (top-1 queue 56.0% vs 73.7%).
 - Short live tickets score lower than dataset tickets, so the score scale differs between live input and the dataset.
 - Some tickets with generic answers sit close to many vague queries. TKT-07586 (answer: "could you please provide more
   details…") often fills a cross-lingual slot for vague German tickets; it is not a real resolution.
