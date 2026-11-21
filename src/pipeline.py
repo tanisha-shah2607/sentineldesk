@@ -131,8 +131,10 @@ def run_ticket_verbose(subject, body, strict: bool | None = None) -> tuple[dict,
     lat["generate_ms"] = _ms(t)
 
     if draft.get("warnings"):
-        gate = {"escalate": True,
+        gate = {**gate, "escalate": True,   # keep S4's extra keys (e.g. "codes")
                 "reasons": gate["reasons"] + ["Draft failed grounding check: " + "; ".join(draft["warnings"])]}
+        if "codes" in gate:
+            gate["codes"] = list(gate["codes"]) + ["DRAFT_GROUNDING"]
     draft = {**draft, "for_review": gate["escalate"]}
 
     lat["total_ms"] = _ms(t0)

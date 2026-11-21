@@ -78,9 +78,10 @@ def effective_gate(item) -> dict:
     """Gate decision plus the major-incident rule (console-level, since run_ticket is stateless)."""
     g, b = item["result"]["gate"], item["burst"]
     if b["burst"]:
-        return {"escalate": True,
+        return {**g, "escalate": True,
                 "reasons": g["reasons"] + [f"Possible major incident: {b['count']} similar tickets in the "
-                                           f"last {ss.detector.window}"]}
+                                           f"last {ss.detector.window}"],
+                "codes": list(g.get("codes", [])) + ["MAJOR_INCIDENT"]}
     return g
 
 
@@ -155,8 +156,12 @@ with tab_console:
 
         if gate["escalate"]:
             st.error("### ⛔ ESCALATE TO ON-CALL ENGINEER")
-            for reason in gate["reasons"]:
-                st.markdown(f"- {reason}")
+            codes = gate.get("codes") or []
+            for i, reason in enumerate(gate["reasons"]):
+                code = f"`{codes[i]}` " if i < len(codes) and len(codes) == len(gate["reasons"]) else ""
+                st.markdown(f"- {code}{reason}")
+            st.caption("Safety-first by design: escalating an extra ticket is cheaper than missing a real outage. "
+                       "Each line is the gate rule that fired.")
             if tri.get("outage_terms"):
                 st.markdown("- Outage wording detected: " + ", ".join(f"“{t}”" for t in tri["outage_terms"]))
         else:
@@ -219,6 +224,7 @@ with tab_queue:
         for h in ss.history:
             t, g = h["result"]["triage"], effective_gate(h)
             rows.append({"id": h["id"], "decision": "ESCALATE" if g["escalate"] else "auto-draft",
+                         "rules": ", ".join(g.get("codes") or []),
                          "burst": "🚨" if h["burst"]["burst"] else "",
                          "lang": t["language"], "type": t["type"], "priority": t["priority"],
                          "queue": t["queue"], "conf": round(t["overall_conf"], 2),

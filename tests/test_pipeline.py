@@ -150,3 +150,12 @@ def test_placeholder_outputs_are_not_live(monkeypatch, tmp_path):
     _, status = P.run_ticket_verbose(None, "My VPN is down")
     assert status["triage"].startswith("placeholder")
     assert status["retrieve"].startswith("placeholder")
+
+
+def test_grounding_escalation_keeps_gate_codes(monkeypatch):
+    def bad_draft(subject, body, lang, hits):
+        return {"text": "x [TKT-1]", "cited_ids": [], "warnings": ["w"], "used_fallback": False}
+    _patch_stage(monkeypatch, "generate", bad_draft)
+    _patch_stage(monkeypatch, "gate", lambda t, h, x: {"escalate": False, "reasons": [], "codes": []})
+    g = P.run_ticket("s", "b")["gate"]
+    assert g["escalate"] and g["codes"] == ["DRAFT_GROUNDING"] and len(g["reasons"]) == 1
