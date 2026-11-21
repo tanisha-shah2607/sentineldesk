@@ -349,6 +349,23 @@ Tests: `pytest tests/test_gate.py tests/test_pii.py tests/test_generate.py tests
 Live check (needs a working `.env`, no data/index/model): `python scripts/llm_smoke.py --models claude-opus-5-5 claude-haiku-5-5 --show`
 runs the 20 adversarial tickets through `draft_reply()` with the real model and reports safety-check failures and latency p50/p95 per model.
 
+## Why so many tickets escalate (deliberate: safety-first)
+`python scripts/tune_gate.py` maps the trade-off on the validation slice (never-seen tickets, triage-driven rules only, so rates
+are a lower bound; S2 re-measured it independently and got the same numbers: 55% / 88% vs our 54% / 87.5%).
+
+| priority bar | CONF_THRESHOLD (T1) | escalation rate | recall of true Incident+high | routine tickets auto-drafted | queue accuracy of auto-drafts |
+|---|---|---|---|---|---|
+| 0.30 | **0.50 (chosen)** | 54% | **87.5%** | 53% | 73% |
+| 0.30 | 0.40 | 42% | 81.6% | 67% | 66% |
+| 0.30 | 0.30 | 31% | 78.1% | 79% | 61% |
+| 0.50 | 0.50 | 50% | 80.0% | 56% | 72% |
+
+T1 is the main lever: each 0.1 step down costs about 6 points of recall and gains about 12 points of auto-drafted routine tickets.
+The priority bar barely matters (0.30 to 0.50 saves 4 points of escalations but loses 7.5 points of recall), so S2's recall-tuned
+bar stays. **The team chose safety-first (T1 = 0.50):** a human reading an extra ticket is cheaper than missing a real outage.
+Confidence is meaningful: queue accuracy of auto-drafted tickets rises with T1 (61% to 73%). Hand-typed tickets look unlike the
+dataset, so they score lower confidence and escalate more often than dataset tickets do.
+
 ## Results
 _S1 fills in after `python evaluate.py` with the real gate and retrieval._
 
