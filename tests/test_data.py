@@ -73,3 +73,18 @@ def test_literal_backslash_n_unescaped():
     t = build_text("Hallo", r"Sehr geehrt,\n\nich schreibe")   # raw string: literal backslash + n
     assert "\\n" not in t and "\n\nich" in t
     assert unescape(None) == "" and unescape(r"a\nb") == "a\nb"
+
+
+@needs_split
+def test_holdout_seen_ids_are_holdout_ids_only():
+    from src.data import holdout_seen_ids, load_test_inputs
+    seen, te = holdout_seen_ids(), set(load_test_inputs().ticket_id)
+    assert seen and seen <= te
+    assert 0.15 < len(seen) / len(te) < 0.40   # ~22% of all holdout tickets have a twin in the KB
+
+
+def test_norm_body_collapses_case_space_and_escapes():
+    import pandas as pd
+    from src.data import norm_body
+    s = pd.Series([r"Hallo  Welt\n\nBitte", "hallo welt bitte"])   # raw: literal backslash-n
+    assert norm_body(s).nunique() == 1

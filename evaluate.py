@@ -1,12 +1,19 @@
 """Owner: S1. Usage: python evaluate.py [--n-cls N] [--n-gen 50]
 
 Three stages, so we never run the LLM over ~10k tickets:
-  A. Classification (triage_batch, FULL clean holdout): Macro-F1 type/queue/priority, language accuracy,
+  A. Classification (triage_batch, FULL clean holdout): Macro-F1 type/queue/priority,
      High-Priority Incident Recall (classifier).
   B. Retrieval + gate (retrieve_batch + decide, FULL clean holdout, NO LLM): escalation rate,
      High-Priority Incident Recall (escalated), retrieval hit rates.
   C. End-to-end generation (run_ticket with the LLM, SAMPLE of --n-gen tickets): citation validity,
      warning rate, fallback rate, latency p50/p95.
+
+HONEST REPORTING (the dataset contains duplicates):
+  ~27% of clean holdout tickets have an exact-body twin in the KB, and twins share labels ~99.7% of the
+  time. Every stage A/B number is therefore reported THREE ways:  all_*  (headline for the brief),
+  never_seen_*  (holdout tickets with no twin in the KB; the fair estimate for new tickets), and, for
+  Macro-F1, by DETECTED language (the dataset's `language` label is wrong on ~11% of tickets, so we
+  group by triage()["language"], never by the label).
 
 DEFINITIONS (state these in the demo):
   High-Priority Incident Recall (escalated)  = of holdout tickets whose TRUE label is Incident + high,
@@ -24,7 +31,7 @@ import numpy as np
 from sklearn.metrics import f1_score
 
 from src.config import RESULTS_DIR, TARGETS
-from src.data import load_test_inputs, load_test_labels
+from src.data import holdout_seen_ids, load_test_inputs, load_test_labels
 from src.gate import decide
 from src.pipeline import run_ticket
 from src.retrieval import retrieve_batch
@@ -32,9 +39,16 @@ from src.text import build_text
 from src.triage import triage_batch
 
 
-def _rate(mask, sel):
+def _rate(flag, sel):
     sel = np.asarray(sel, dtype=bool)
-    return float(np.asarray(mask)[sel].mean()) if sel.any() else None
+    return float(np.asarray(flag)[sel].mean()) if sel.any() else None
+
+
+def _f1(y_true, y_pred, sel):
+    sel = np.asarray(sel, dtype=bool)
+    if not sel.any():
+        return None
+    return float(f1_score(np.asarray(y_true)[sel], np.asarray(y_pred)[sel], average="macro", zero_division=0))
 
 
 def main(n_cls: int | None, n_gen: int):
@@ -42,36 +56,51 @@ def main(n_cls: int | None, n_gen: int):
     if n_cls:
         labels = labels.head(n_cls)
     inputs = load_test_inputs().set_index("ticket_id").loc[labels.ticket_id]
+    seen_ids = holdout_seen_ids()
     labels = labels.set_index("ticket_id")
     items = list(zip(inputs["subject"], inputs["body"]))
     texts = [build_text(s, b) for s, b in items]
-    res = {"n_eval": len(items)}
+    seen = np.array([t in seen_ids for t in labels.index])
+    subsets = {"all": np.ones(len(items), dtype=bool), "never_seen": ~seen}
 
     true_hi = ((labels["type"] == "Incident") & (labels["priority"] == "high")).values
-    res["n_true_high_incident"] = int(true_hi.sum())
+    res = {"n_eval": len(items), "n_twin_in_kb": int(seen.sum()), "n_never_seen": int((~seen).sum()),
+           "n_true_high_incident": int(true_hi.sum()),
+           "n_true_high_incident_never_seen": int((true_hi & ~seen).sum())}
 
     # ---- Stage A: classification (full holdout)
     t = time.perf_counter()
     preds = triage_batch(items)
     res["triage_batch_seconds"] = round(time.perf_counter() - t, 2)
-    for tgt in TARGETS:
-        res[f"macro_f1_{tgt}"] = float(f1_score(labels[tgt], [p[tgt] for p in preds],
-                                                average="macro", zero_division=0))
-    res["language_accuracy"] = float(np.mean([p["language"] == l for p, l in zip(preds, labels["language"])]))
+    det_lang = np.array([p["language"] for p in preds])
     pred_hi = np.array([p["type"] == "Incident" and p["priority"] == "high" for p in preds])
-    res["hp_incident_recall_classifier"] = _rate(pred_hi, true_hi)
+    for name, sel in subsets.items():
+        for tgt in TARGETS:
+            res[f"{name}_macro_f1_{tgt}"] = _f1(labels[tgt].values, [p[tgt] for p in preds], sel)
+        res[f"{name}_hp_incident_recall_classifier"] = _rate(pred_hi, true_hi & sel)
+    for lang in ("en", "de"):                        # grouped by DETECTED language, not the label
+        sel = det_lang == lang
+        res[f"detected_{lang}_n"] = int(sel.sum())
+        for tgt in TARGETS:
+            res[f"detected_{lang}_macro_f1_{tgt}"] = _f1(labels[tgt].values, [p[tgt] for p in preds], sel)
+    res["language_label_agreement_NOT_ACCURACY"] = float(np.mean(det_lang == labels["language"].values))
 
     # ---- Stage B: retrieval + gate (full holdout, no LLM)
     hits = retrieve_batch(texts)
     gates = [decide(p, h, tx) for p, h, tx in zip(preds, hits, texts)]
     esc = np.array([g["escalate"] for g in gates])
-    res["escalation_rate"] = float(esc.mean())
-    res["hp_incident_recall_escalated"] = _rate(esc, true_hi)
-    res["auto_draft_queue_accuracy"] = _rate([p["queue"] == q for p, q in zip(preds, labels["queue"])], ~esc)
     q, ty = labels["queue"].values, labels["type"].values
-    res["retrieval_top1_queue_match"] = float(np.mean([bool(h) and h[0]["queue"] == a for h, a in zip(hits, q)]))
-    res["retrieval_anyk_queue_match"] = float(np.mean([any(x["queue"] == a for x in h) for h, a in zip(hits, q)]))
-    res["retrieval_anyk_type_match"] = float(np.mean([any(x["type"] == a for x in h) for h, a in zip(hits, ty)]))
+    q_ok = np.array([p["queue"] == a for p, a in zip(preds, q)])
+    top1_q = np.array([bool(h) and h[0]["queue"] == a for h, a in zip(hits, q)])
+    anyk_q = np.array([any(x["queue"] == a for x in h) for h, a in zip(hits, q)])
+    anyk_t = np.array([any(x["type"] == a for x in h) for h, a in zip(hits, ty)])
+    for name, sel in subsets.items():
+        res[f"{name}_escalation_rate"] = _rate(esc, sel)
+        res[f"{name}_hp_incident_recall_escalated"] = _rate(esc, true_hi & sel)
+        res[f"{name}_auto_draft_queue_accuracy"] = _rate(q_ok, ~esc & sel)
+        res[f"{name}_retrieval_top1_queue_match"] = _rate(top1_q, sel)
+        res[f"{name}_retrieval_anyk_queue_match"] = _rate(anyk_q, sel)
+        res[f"{name}_retrieval_anyk_type_match"] = _rate(anyk_t, sel)
 
     # ---- Stage C: end-to-end generation (sample)
     lats, warn, fb, bad_cite = [], [], [], []
@@ -88,10 +117,13 @@ def main(n_cls: int | None, n_gen: int):
                     "latency_p50_ms": float(np.percentile(lats, 50)),
                     "latency_p95_ms": float(np.percentile(lats, 95))})
 
+    def fmt(v):
+        return f"{v:.3f}" if isinstance(v, float) else v
+
     RESULTS_DIR.mkdir(exist_ok=True)
     (RESULTS_DIR / "results.json").write_text(json.dumps(res, indent=2))
     (RESULTS_DIR / "results.md").write_text(
-        "| metric | value |\n|---|---|\n" + "\n".join(f"| {k} | {v} |" for k, v in res.items()) + "\n",
+        "| metric | value |\n|---|---|\n" + "\n".join(f"| {k} | {fmt(v)} |" for k, v in res.items()) + "\n",
         encoding="utf-8")
     print(json.dumps(res, indent=2))
 
