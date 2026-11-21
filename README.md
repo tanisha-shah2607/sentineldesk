@@ -378,7 +378,35 @@ Confidence is meaningful: queue accuracy of auto-drafted tickets rises with T1 (
 dataset, so they score lower confidence and escalate more often than dataset tickets do.
 
 ## Results
-_S1 fills in after `python evaluate.py` with the real gate and retrieval._
+All numbers below were measured on the real system; anything not measured is listed under "Not measured".
+
+**Triage classifier: full clean holdout (9,768 tickets; 7,083 never-seen, i.e. no exact-body twin in the KB)**
+
+| metric | all | never-seen |
+|---|---|---|
+| Macro-F1 type | 0.892 | 0.857 |
+| Macro-F1 queue | 0.672 | 0.562 |
+| Macro-F1 priority | 0.703 | 0.606 |
+| High-Priority Incident recall, classifier alone (true Incident+high predicted as both) | 0.830 | 0.775 |
+
+By detected language (all tickets), type / queue / priority Macro-F1: English (6,802 tickets) 0.906 / 0.720 / 0.730,
+German (2,966 tickets) 0.858 / 0.544 / 0.637. German queue routing is the weakest spot. Lead with the never-seen column:
+27% of the clean holdout has an exact twin in the KB with the same labels (see "Duplicates" above). Floors for context are in
+"Baseline floors" above (a plain TF-IDF SVM scores about the same Macro-F1; `triage()` adds calibrated confidence, the outage
+rule and +4 to +5 points of high-priority incident recall).
+
+**Escalation gate (validation slice, never-seen, safety-first setting T1 = 0.50):** about 54% of tickets escalate and 87.5% of
+true Incident+high tickets are escalated (full trade-off table above; S2 reproduced it independently: 55% / 88%).
+
+**Leakage audit (`python scripts/leakage_audit.py`, real index built): 4/4 PASS**: no holdout answers on disk; no holdout
+loaders used outside scoring scripts; no holdout ticket ids in models/ or index/; 793 distinct ids returned from 200 holdout
+queries, all from the KB.
+
+**Not measured (be upfront in Q&A):** the end-to-end retrieval hit rates, gate escalation rate and *escalated* High-Priority
+Incident recall over the full holdout, and the 50-ticket generation sample, were not completed before submission (the
+full-holdout retrieval run on a CPU-only laptop was too slow). `python evaluate.py --n-gen 50` produces them on a machine
+with the index and a Groq key; it separates correct refusals (`DRAFT_HANDOFF`) from grounding failures (`DRAFT_GROUNDING`).
+Retrieval floor for comparison: TF-IDF keyword search matches the queue with its top hit 73% of the time on never-seen tickets.
 
 ## Data credit and license
 Dataset: [Tobi-Bueck/customer-support-tickets](https://huggingface.co/datasets/Tobi-Bueck/customer-support-tickets) on Hugging Face,
