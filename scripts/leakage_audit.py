@@ -39,10 +39,11 @@ def check_disk():
 # ---------------------------------------------------------------- 2. static
 # pattern -> (allowed path prefixes/names, severity if violated)
 RULES = {
+    # evaluate.py and baselines.py are scoring-only scripts: they load labels to SCORE predictions, never as input
     r"load_test_labels|TEST_LABEL_PATH|test_labels": (
-        {"evaluate.py", "src/data.py", "src/config.py", "scripts/leakage_audit.py"}, "FAIL"),
+        {"evaluate.py", "scripts/baselines.py", "src/data.py", "src/config.py", "scripts/leakage_audit.py"}, "FAIL"),
     r"load_test_inputs|TEST_INPUT_PATH|test_inputs": (
-        {"evaluate.py", "src/data.py", "src/config.py", "scripts/leakage_audit.py"}, "WARN"),
+        {"evaluate.py", "scripts/baselines.py", "src/data.py", "src/config.py", "scripts/leakage_audit.py"}, "WARN"),
     r"read_parquet|read_csv|load_dataset|read_json\(|open\(.*data/": (
         # src/retrieval.py only reads its own index/ cache (kb_meta.parquet), never data/
         {"src/data.py", "src/retrieval.py", "scripts/leakage_audit.py", "scripts/run_adversarial.py"}, "WARN"),
