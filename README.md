@@ -145,5 +145,24 @@ Windows machines where pyarrow's DLL is blocked need `fastparquet` (in requireme
 - `python scripts/leakage_audit.py`: disk (no holdout answers), static scan (who touches holdout files/loaders),
   models/ and index/ contain no holdout ticket ids, retrieval returns only KB ids. Exits 1 on any FAIL.
 
+## Baseline floors (`python scripts/baselines.py`, trained on clean KB, scored on the 9,768-ticket clean holdout)
+Macro-F1 (type / queue / priority) and High-Priority Incident recall from the classifier alone:
+
+| model | all | never-seen (7,083) |
+|---|---|---|
+| majority class | 0.142 / 0.045 / 0.192, recall 0.000 | 0.142 / 0.044 / 0.193, recall 0.000 |
+| plain TF-IDF + linear SVM | 0.897 / 0.673 / 0.714, recall 0.789 | 0.859 / 0.565 / 0.619, recall 0.721 |
+| S2 calibrated model (`triage()`) | 0.892 / 0.672 / 0.703, recall 0.830 | 0.857 / 0.562 / 0.606, recall 0.775 |
+
+Read this honestly: the dataset's labels cap accuracy (queue tops out near 0.67), and a plain SVM matches `triage()` on Macro-F1.
+What `triage()` adds is calibrated confidence for the gate, the outage rule, and higher high-priority-incident recall (+4 to +5 points).
+TF-IDF keyword retrieval (queue match of the top hit / any of top 5): all 0.802 / 0.909, never-seen **0.729 / 0.875**; type match
+of any of top 5 is 0.99 either way. The dense (e5) retriever should beat the never-seen numbers, especially cross-lingually.
+
 ## Results
-_S1 fills in after `python evaluate.py`._
+_S1 fills in after `python evaluate.py` with the real gate and retrieval._
+
+## Data credit and license
+Dataset: [Tobi-Bueck/customer-support-tickets](https://huggingface.co/datasets/Tobi-Bueck/customer-support-tickets) on Hugging Face,
+licensed CC BY-NC 4.0 (attribution, non-commercial). SentinelDesk is a hackathon project and is not for commercial use. The data
+is not redistributed in this repository (`data/` is gitignored).
