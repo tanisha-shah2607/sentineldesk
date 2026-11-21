@@ -1,14 +1,138 @@
-"""Owner: S4. Single LLM entry point so providers are swappable in one place."""
+"""Owner: S4. Single LLM entry point so providers are swappable in one place.
+
+llm_complete(prompt, system="") -> str     raises LLMError on any failure (caller falls back to a template)
+llm_available() -> bool                    True if a provider is configured (no network call)
+
+.env settings:
+  LLM_PROVIDER = none | anthropic | vertex | ollama
+  LLM_MODEL    = model id (Claude default: claude-opus-5-5; for lower demo latency try claude-haiku-5-5)
+  LLM_EFFORT   = low | medium | high      (Claude only, default low: short grounded replies)
+  LLM_TIMEOUT  = seconds per call (default 30)
+  anthropic:  ANTHROPIC_API_KEY
+  vertex:     Claude on Google Cloud Vertex AI. No API key: sign in once with
+              `gcloud auth application-default login`. ANTHROPIC_VERTEX_PROJECT_ID (else the gcloud
+              default project), CLOUD_ML_REGION (default global), LLM_FALLBACK_MODEL (default
+              claude-opus-4-8, must also be enabled in Model Garden; empty disables).
+"""
+from __future__ import annotations
+
 import os
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:  # dotenv is optional for tests
+    pass
 
-load_dotenv()
+DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
+DEFAULT_VERTEX_FALLBACK = "claude-opus-4-8"
+DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
+# models that support refusal fallbacks (server-side on the Claude API, client-side middleware on Vertex)
+_FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-fable-5-2"}
+
+_clients: dict = {}
+
+
+class LLMError(RuntimeError):
+    pass
+
+
+def _provider() -> str:
+    return os.getenv("LLM_PROVIDER", "none").strip().lower()
+
+
+def _timeout() -> float:
+    return float(os.getenv("LLM_TIMEOUT", "30"))
+
+
+def _model() -> str:
+    return os.getenv("LLM_MODEL") or DEFAULT_CLAUDE_MODEL
+
+
+def llm_available() -> bool:
+    p = _provider()
+    if p == "anthropic":
+        return bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN"))
+    return p in ("vertex", "ollama")  # vertex auth is checked on the first call (falls back if missing)
+
+
+def _import_anthropic():
+    try:
+        import anthropic
+        return anthropic
+    except Exception as e:  # not installed, or blocked by OS policy
+        raise LLMError(f"anthropic SDK unavailable: {e}") from e
+
+
+def _get_client(provider: str):
+    if provider in _clients:
+        return _clients[provider]
+    anthropic = _import_anthropic()
+    if provider == "anthropic":
+        client = anthropic.Anthropic(timeout=_timeout(), max_retries=1)
+    else:  # vertex: Google Application Default Credentials, no API key
+        fallback = os.getenv("LLM_FALLBACK_MODEL", DEFAULT_VERTEX_FALLBACK).strip()
+        middleware = ([anthropic.BetaRefusalFallbackMiddleware([{"model": fallback}])]
+                      if fallback and _model() in _FALLBACK_MODELS else None)
+        client = anthropic.AnthropicVertex(region=os.getenv("CLOUD_ML_REGION") or "global",
+                                           timeout=_timeout(), max_retries=1, middleware=middleware)
+    _clients[provider] = client
+    return client
+
+
+def _claude(provider: str, prompt: str, system: str) -> str:
+    anthropic = _import_anthropic()
+    client = _get_client(provider)
+    model = _model()
+    kwargs = dict(
+        model=model,
+        max_tokens=4000,
+        messages=[{"role": "user", "content": prompt}],
+        output_config={"effort": os.getenv("LLM_EFFORT", "low")},
+    )
+    if system:
+        kwargs["system"] = system
+    if provider == "anthropic" and model in _FALLBACK_MODELS:  # server-side refusal fallback
+        kwargs.update(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+    try:
+        # beta endpoint: carries the fallback params, and the Vertex refusal middleware hooks into it
+        resp = client.beta.messages.create(**kwargs)
+    except anthropic.APIError as e:
+        raise LLMError(f"Claude API error ({provider}): {e}") from e
+    except Exception as e:  # e.g. google.auth DefaultCredentialsError when gcloud login was skipped
+        hint = " (run: gcloud auth application-default login)" if provider == "vertex" else ""
+        raise LLMError(f"{type(e).__name__}: {e}{hint}") from e
+    if resp.stop_reason == "refusal":
+        raise LLMError("model declined the request")
+    text = "".join(b.text for b in resp.content if b.type == "text").strip()
+    if not text:
+        raise LLMError(f"empty response (stop_reason={resp.stop_reason})")
+    return text
+
+
+def _ollama(prompt: str, system: str) -> str:
+    import requests
+    url = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/") + "/api/chat"
+    msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
+    try:
+        r = requests.post(url, timeout=_timeout(), json={
+            "model": os.getenv("LLM_MODEL") or DEFAULT_OLLAMA_MODEL,
+            "messages": msgs, "stream": False, "options": {"temperature": 0.2}})
+        r.raise_for_status()
+        text = r.json()["message"]["content"].strip()
+    except Exception as e:
+        raise LLMError(f"Ollama error: {e}") from e
+    if not text:
+        raise LLMError("empty response from Ollama")
+    return text
 
 
 def llm_complete(prompt: str, system: str = "") -> str:
-    provider = os.getenv("LLM_PROVIDER", "none")
-    if provider == "none":
-        raise RuntimeError("LLM_PROVIDER not configured")
-    # TODO(S4): implement anthropic / openai / ollama branches
-    raise NotImplementedError(provider)
+    p = _provider()
+    if p in ("anthropic", "vertex"):
+        return _claude(p, prompt, system)
+    if p == "ollama":
+        return _ollama(prompt, system)
+    if p == "none":
+        raise LLMError("LLM_PROVIDER not configured")
+    raise LLMError(f"unsupported LLM_PROVIDER '{p}' (use anthropic, vertex or ollama)")

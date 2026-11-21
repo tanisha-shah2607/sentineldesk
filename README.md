@@ -30,7 +30,7 @@ Return shapes are documented at the top of each module; every stub already retur
 - `build_text` / `unescape` (src/text.py) turn literal `\n` escapes (21% of bodies, 3% of answers) into real line breaks.
   Use `unescape(answer)` before showing or prompting with an answer.
 - `retrieve` -> `[{ticket_id, score, subject, answer, snippet, queue, type, language}]`
-- `decide` -> `{escalate, reasons}`; `draft_reply` -> `{text, cited_ids, warnings, used_fallback}`
+- `decide` -> `{escalate, reasons, codes}`; `draft_reply` -> `{text, cited_ids, warnings, used_fallback, llm_error}` (`codes` and `llm_error` are additive)
 - `run_ticket` -> `{triage, hits, gate, draft(+for_review), latency}`; latency keys (ms): `triage_ms, retrieve_ms, gate_ms, generate_ms, total_ms`
 - Two-stage escalation: `decide()` runs before generation; any draft `warnings` afterwards also escalate. Escalated tickets still get a draft, labelled "for engineer review".
 
@@ -64,6 +64,43 @@ escalates to a human. We also report the classifier version: the fraction for wh
   Note: with the stubs everything escalates, so most cases pass trivially; it only becomes meaningful with real modules.
 - `python scripts/leakage_audit.py`: disk (no holdout answers), static scan (who touches holdout files/loaders),
   models/ and index/ contain no holdout ticket ids, retrieval returns only KB ids. Exits 1 on any FAIL.
+
+## Gate and generation (S4)
+**Escalation gate** (`src/gate.py`): deterministic rules, each a pure function. Any rule that fires sends the ticket to
+"Escalate to On-Call Engineer". `decide()` returns `{escalate, reasons, codes}`, where `codes` are rule ids that evaluate.py can count.
+
+| Code | Fires when | Notes |
+|---|---|---|
+| `HIGH_INCIDENT` | predicted `priority == high` and `type == Incident` | the brief's mandatory rule |
+| `LOW_CONFIDENCE` | `overall_conf < CONF_THRESHOLD` | threshold in `config.py`, tuned on the `val` slice |
+| `NO_PRECEDENT` | no hits, or top similarity `< SIM_THRESHOLD` | the score scale comes from S3's index |
+| `UNSUPPORTED_ASK` | ticket asks for a refund/compensation, a price/discount, or a guarantee/SLA, and no retrieved answer covers that topic | en + de keyword patterns |
+| `LEGAL` | legal threat or legal commitment (lawsuit, lawyer, *Anwalt*, *Klage* ...) | always a human |
+| `PROMPT_INJECTION` | "ignore previous instructions", "system prompt", *"ignoriere alle vorherigen Anweisungen"* ... | |
+| `EMPTY_TICKET` | body under 15 characters | |
+
+After generation, any draft `warning` also escalates the ticket (see `pipeline.py`).
+
+**Grounded generation** (`src/generate.py`, `src/llm.py`): hallucination control works in layers.
+1. **PII masking** (`src/pii.py`): emails, phone numbers, IPs, IBANs, Luhn-valid card numbers, labelled account numbers
+   and URL credentials are masked in the ticket *and* the precedents before anything is sent to the LLM.
+2. **Prompt**: the model sees only the top-k retrieved precedents. The ticket is framed as untrusted customer text, and
+   its `<`/`>` are escaped so it cannot close the frame. The model must cite `[TKT-xxxxx]` inline, reply in the
+   detected language (translating cross-lingual precedents), and say "cannot confirm" for anything outside the evidence.
+3. **Output validator** (`validate_draft`): strips citations not in the retrieved set; strips sentences with money amounts,
+   percentages, deadlines ("within 4 hours"), or refund/guarantee/SLA/credit/discount/free-of-charge claims that the
+   evidence does not support (refusal sentences such as "we cannot confirm a refund" are kept); flags a draft with no
+   citation or in the wrong language. Every fix adds a `warning`, so the ticket escalates.
+4. **Template fallback**: if the LLM is not configured, fails, times out or refuses, the reply quotes the top precedent
+   verbatim in a localized template. That reply is grounded by construction (`used_fallback: true`, `llm_error` says why).
+
+LLM setup (`.env`, see `.env.example`). The default model is `claude-opus-5-5` at `LLM_EFFORT=low`; set `LLM_MODEL=claude-haiku-5-5` for lower latency.
+- `LLM_PROVIDER=anthropic`: direct Claude API with `ANTHROPIC_API_KEY`, plus the server-side refusal fallback.
+- `LLM_PROVIDER=vertex`: Claude on Google Cloud Vertex AI, paid with Google Cloud credits. There is no API key (a Gemini key does not work).
+  Enable the Claude model in Vertex AI Model Garden, run `gcloud auth application-default login`, and set `ANTHROPIC_VERTEX_PROJECT_ID`.
+  Refusals retry on `LLM_FALLBACK_MODEL` through the SDK's client-side middleware.
+- `LLM_PROVIDER=ollama`: a local model. With `LLM_PROVIDER=none` the app still works using template replies.
+Tests: `pytest tests/test_gate.py tests/test_pii.py tests/test_generate.py tests/test_llm.py` (offline; the LLM is faked).
 
 ## Results
 _S1 fills in after `python evaluate.py`._
