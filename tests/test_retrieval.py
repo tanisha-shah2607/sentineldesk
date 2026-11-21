@@ -57,6 +57,30 @@ def test_batch_matches_single():
 
 
 @needs_index
+def test_cross_lingual_mix():
+    de = "Unser Netzwerkdrucker wird seit heute als offline angezeigt und niemand kann drucken."
+    mixed, plain = retrieve(de, k=5), retrieve(de, k=5, xl_slots=0)
+    assert {h["language"] for h in mixed} == {"en", "de"}          # both languages present
+    assert mixed[0]["ticket_id"] == plain[0]["ticket_id"]           # top-1 (gate score) unchanged
+    assert mixed[0]["score"] == plain[0]["score"]
+    scores = [h["score"] for h in mixed]
+    assert scores == sorted(scores, reverse=True) and len({h["ticket_id"] for h in mixed}) == 5
+    assert retrieve(de, k=1)[0]["ticket_id"] == plain[0]["ticket_id"]   # k <= slots: no mixing
+
+
+@needs_index
+def test_hit_language_is_detected_not_label():
+    """The dataset label is wrong on ~11% of KB tickets; the index stores the detected language."""
+    from src.data import load_kb_clean
+    from src.triage import detect_language, language_text
+    recs = _load("all")[1][:300]
+    kb = load_kb_clean(need_answer=True).set_index("ticket_id")
+    for r in recs:
+        row = kb.loc[r["ticket_id"]]
+        assert r["language"] == detect_language(language_text(row["subject"], row["body"]))
+
+
+@needs_index
 def test_null_subjects_are_empty_strings():
     recs = _load("all")[1]
     assert all(isinstance(r["subject"], str) and r["subject"] != "nan" for r in recs)

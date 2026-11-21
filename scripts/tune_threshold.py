@@ -34,6 +34,7 @@ from src.config import RESULTS_DIR, ROOT  # noqa: E402
 from src.data import load_kb_clean  # noqa: E402
 from src.retrieval import _load, _norm_body, retrieve_batch  # noqa: E402
 from src.text import build_text  # noqa: E402
+from src.triage import detect_language, language_text  # noqa: E402
 
 # Clearly out-of-scope for an IT/product helpdesk (en + de), written for this script.
 OUT_OF_SCOPE = [
@@ -90,7 +91,9 @@ def main(max_flag: float) -> None:
 
     hits = retrieve_batch(texts, k=5, part="train")
     top1 = np.array([h[0]["score"] for h in hits])
-    q, ty, lang = val["queue"].to_numpy(), val["type"].to_numpy(), val["language"].to_numpy()
+    q, ty = val["queue"].to_numpy(), val["type"].to_numpy()
+    # Detected language, not the dataset label (wrong on ~11% of tickets).
+    lang = np.array([detect_language(language_text(s, b)) for s, b in zip(val["subject"], val["body"])])
     q1 = np.array([h[0]["queue"] == a for h, a in zip(hits, q)])
     q5 = np.array([any(x["queue"] == a for x in h) for h, a in zip(hits, q)])
     t1 = np.array([h[0]["type"] == a for h, a in zip(hits, ty)])

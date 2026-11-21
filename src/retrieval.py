@@ -5,18 +5,25 @@ done in NumPy. FAISS is not used: on macOS its wheel and torch's wheel each bund
 loading both aborts the process ("OMP: Error #15"). At ~33k vectors exact NumPy search is
 a few ms per query, so nothing is lost.
 
-retrieve(text, k=5, part="all") -> [{
+retrieve(text, k=5, part="all", xl_slots=None) -> [{
   "ticket_id": "TKT-00012", "score": float (cosine; e5 scores sit in a narrow high band, ~0.75-0.95),
   "subject": str, "answer": str, "snippet": str (answer[:300]),
-  "queue": str, "type": str, "language": str
+  "queue": str, "type": str, "language": str ("en"|"de", DETECTED by src.triage, not the dataset label)
 }]  sorted by score desc; [] for empty text
-retrieve_batch(texts, k, part="all") -> [list_of_hits, ...]   (evaluate.py runs this on the full holdout)
+retrieve_batch(texts, k, part="all", xl_slots=None) -> [list_of_hits, ...]   (evaluate.py runs this on the full holdout)
 
 RULES:
   - Index load_kb_clean(need_answer=True) only (never anything from the holdout).
   - Two index builds: part="train" (for tuning SIM_THRESHOLD on part="val" queries, so a val
     ticket never retrieves itself) and part="all" (the final index used by the app).
   - Duplicate bodies are collapsed to one ticket (lowest ticket_id) so top-k hits are distinct.
+  - Cross-lingual mix (bonus): e5 gives same-language tickets a small score bonus, so a German
+    ticket usually gets 5 German hits even when English precedents are as good. With k > slots,
+    the top (k - CROSS_LINGUAL_SLOTS) hits are the best overall and the remaining slots go to the
+    best tickets in whichever language is under-represented among them. Hits stay sorted by their
+    real cosine score, so hits[0] (what the gate's SIM_THRESHOLD uses) never changes.
+    On val: German any-of-top-5 queue match 82.1% -> 86.3%, English 88.0% -> 89.6%
+    (scripts/cross_lingual.py). Set CROSS_LINGUAL_SLOTS=0 (env) or xl_slots=0 to disable.
   - e5 query/passage prefixes live here; the input text comes from src.text.build_text.
 
 Build: python scripts/build_index.py   (embeds once into index/, then builds both indexes)
@@ -38,6 +45,7 @@ MODEL_NAME = os.getenv("EMBED_MODEL", "intfloat/multilingual-e5-base")
 QUERY_PREFIX, PASSAGE_PREFIX = "query: ", "passage: "   # required by e5 models
 BATCH_SIZE = 64
 SEARCH_CHUNK = 512        # queries per matrix multiply in retrieve_batch (caps memory at ~70 MB)
+CROSS_LINGUAL_SLOTS = int(os.getenv("CROSS_LINGUAL_SLOTS", "2"))   # of k hits, reserved for the other language
 SNIPPET_CHARS = 300
 PARTS = ("all", "train")
 
@@ -159,14 +167,23 @@ def build_index(part: str = "all") -> dict:
     emb, meta = emb[sel], meta[sel].reset_index(drop=True)
     body = meta[["ticket_id"]].merge(kb, on="ticket_id", how="left")["body"]
     meta["_body"] = _norm_body(body).to_numpy()
+    meta["_raw_body"] = body.to_numpy()
 
     keep = _dedupe_positions(meta)
     emb = np.ascontiguousarray(emb[keep])
-    meta = meta.iloc[keep].drop(columns="_body").reset_index(drop=True)
+    meta = meta.iloc[keep].reset_index(drop=True)
+    # `language` = detected language (S2's detector), not the dataset label: the label is wrong on
+    # ~11% of KB tickets (26% of those labelled "de" are written in English). Used for the hits'
+    # `language` field and for the cross-lingual mix. ~9 s for the full index.
+    from .triage import detect_language, language_text
+    meta["language"] = [detect_language(language_text(s, b))
+                        for s, b in zip(meta["subject"], meta["_raw_body"])]
+    meta = meta.drop(columns=["_body", "_raw_body"])
 
     np.save(_vec_path(part), emb)
     meta.to_parquet(_meta_path(part), index=False)
     _load.cache_clear()
+    _lang_positions.cache_clear()
     stats = {"part": part, "selected": int(sel.sum()), "indexed": int(len(emb)),
              "duplicates_dropped": int(sel.sum() - len(emb))}
     print(f"Built {_vec_path(part).name}: {stats}")
@@ -209,6 +226,41 @@ def _top_k(vecs: np.ndarray, q: np.ndarray, k: int) -> tuple[np.ndarray, np.ndar
     return np.vstack(all_s), np.vstack(all_i)
 
 
+@lru_cache(maxsize=len(PARTS))
+def _lang_positions(part: str) -> dict[str, np.ndarray]:
+    """Row positions of each language in the index for `part`."""
+    langs = np.array([r["language"] for r in _load(part)[1]])
+    return {lang: np.flatnonzero(langs == lang) for lang in sorted(set(langs))}
+
+
+def _search(part: str, q: np.ndarray, k: int, slots: int) -> list[list[tuple[float, int]]]:
+    """Per query: [(score, row), ...] sorted by score desc. Applies the cross-lingual mix."""
+    vecs, records = _load(part)
+    S, I = _top_k(vecs, q, k)
+    if slots <= 0 or k <= slots:
+        return [list(zip(S[n].tolist(), I[n].tolist())) for n in range(len(q))]
+    pos = _lang_positions(part)
+    per_lang = {}
+    for lang, p in pos.items():
+        s, i = _top_k(vecs[p], q, min(k, len(p)))
+        per_lang[lang] = (s, p[i])
+    rows = []
+    for n in range(len(q)):
+        base = list(zip(S[n, :k - slots].tolist(), I[n, :k - slots].tolist()))
+        taken = {j for _, j in base}
+        counts = {lang: 0 for lang in pos}
+        for _, j in base:
+            counts[records[j]["language"]] += 1
+        other = min(pos, key=lambda lang: (counts[lang], lang != "en"))   # under-represented language
+        s_o, i_o = per_lang[other]
+        extra = [(float(s), int(j)) for s, j in zip(s_o[n], i_o[n]) if int(j) not in taken][:slots]
+        if len(extra) < slots:                                             # tiny index: fill from overall
+            extra += [(float(s), int(j)) for s, j in zip(S[n], I[n])
+                      if int(j) not in taken and int(j) not in {e[1] for e in extra}][:slots - len(extra)]
+        rows.append(sorted(base + extra, key=lambda t: -t[0]))
+    return rows
+
+
 def warmup(part: str = "all") -> None:
     """Load model + index and run one query so the first real request is fast (call at app start)."""
     retrieve("warmup", k=1, part=part)
@@ -227,20 +279,21 @@ def _stub_mode() -> bool:
     return os.getenv("RETRIEVAL_STUB") == "1"
 
 
-def retrieve_batch(texts: list[str], k: int = TOP_K, part: str = "all") -> list[list[dict]]:
+def retrieve_batch(texts: list[str], k: int = TOP_K, part: str = "all",
+                   xl_slots: int | None = None) -> list[list[dict]]:
     if _stub_mode():
         return [[dict(_STUB_HIT)][:k] if t and t.strip() else [] for t in texts]
     out: list[list[dict]] = [[] for _ in texts]
     live = [i for i, t in enumerate(texts) if isinstance(t, str) and t.strip()]
     if not live or k <= 0:
         return out
-    vecs, records = _load(part)
+    records = _load(part)[1]
     q = embed_texts([texts[i] for i in live], is_query=True)
-    scores, ids = _top_k(vecs, q, k)
-    for row, i in enumerate(live):
-        out[i] = [{**records[j], "score": float(s)} for s, j in zip(scores[row], ids[row])]
+    slots = CROSS_LINGUAL_SLOTS if xl_slots is None else xl_slots
+    for row, i in zip(_search(part, q, k, slots), live):
+        out[i] = [{**records[j], "score": s} for s, j in row]
     return out
 
 
-def retrieve(text: str, k: int = TOP_K, part: str = "all") -> list[dict]:
-    return retrieve_batch([text], k=k, part=part)[0]
+def retrieve(text: str, k: int = TOP_K, part: str = "all", xl_slots: int | None = None) -> list[dict]:
+    return retrieve_batch([text], k=k, part=part, xl_slots=xl_slots)[0]
