@@ -1,0 +1,14 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ipynb_checkpoints
+.claude
+.env
+.streamlit/secrets.toml
+*.zip
+# Never ship the dataset (leakage + size). The app needs only models/ and index/.
+data/
+results/

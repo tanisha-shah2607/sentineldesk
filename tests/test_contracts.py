@@ -1,4 +1,4 @@
-"""Contract tests: run these after every change. They need no data or models."""
+"""Owner: The team. Contract tests: run these after every change. They need no data or models."""
 from src.config import LATENCY_KEYS
 from src.data import build_text
 from src.gate import decide

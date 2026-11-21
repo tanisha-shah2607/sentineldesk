@@ -6,8 +6,9 @@ Multilingual incident triage, smart escalation, and precedent-grounded reply cop
 ```
 python -m venv .venv
 .venv\Scripts\activate          # Windows
+source .venv/bin/activate       # macOS / Linux
 pip install -r requirements.txt
-copy .env.example .env          # then fill in LLM settings (S4)
+copy .env.example .env          # Windows (macOS/Linux: cp .env.example .env); then fill in LLM settings (S4)
 python scripts/make_split.py    # prints row count + fingerprint; aborts if your dataset differs from the team's
 python scripts/train_triage.py  # triage classifier (~1.5 min) -> models/triage.joblib, prints validation metrics
 python scripts/build_index.py   # embeds the KB once into index/ (~2 min on Apple GPU, longer on CPU)
@@ -16,6 +17,22 @@ pytest
 Run UI: `streamlit run app.py` · Evaluate: `python evaluate.py --n-gen 50`
 Do not `pip freeze > requirements.txt` in PowerShell (writes UTF-16). Edit requirements.txt by hand.
 
+## Run it
+| What | Command |
+|---|---|
+| Launch the console (first run also creates `.venv`, the data split, triage model and index) | `./run.sh` (macOS/Linux) · `run.bat` (Windows) |
+| After `git pull` when a teammate changed the model or index | `./run.sh --rebuild` · `run.bat --rebuild` |
+| Fresh machine: data + triage model + index, then readiness check | `python scripts/prepare.py --split --train --index` |
+| Deploy to Cloud Run | [`docs/deploy_cloud_run.md`](docs/deploy_cloud_run.md) (`Dockerfile`) |
+| Contract smoke test on demo tickets | `python -m src.pipeline --check` |
+| One ticket from the CLI | `python -m src.pipeline --subject "VPN" --body "VPN drops every 10 min"` |
+| Clean-checkout test (what a judge sees) | `scripts/fresh_clone_test.sh [--light \| --full]` |
+
+Stages that raise `NotImplementedError` (or error) fall back to labelled demo stand-ins from `src/mocks.py`, so the
+console always runs; the sidebar's **System status** shows which stages are live. `SENTINELDESK_STRICT=1` re-raises
+stage errors instead; `SENTINELDESK_FORCE_MOCKS=all` (or `triage,retrieve,…`) forces stand-ins for UI rehearsal.
+Demo walkthrough: [`docs/demo_script.md`](docs/demo_script.md).
+
 ## Ownership and contracts
 | Module | Owner | Contract |
 |---|---|---|
@@ -23,7 +40,8 @@ Do not `pip freeze > requirements.txt` in PowerShell (writes UTF-16). Edit requi
 | `src/triage.py` | S2 | `triage(subject, body)`, `triage_batch([(subject, body)])` |
 | `src/retrieval.py` | S3 | `retrieve(text, k)`, `retrieve_batch(texts, k)`, `build_index(part)` |
 | `src/gate.py`, `generate.py`, `llm.py`, `pii.py` | S4 | `decide(...)`, `draft_reply(...)` |
-| `src/pipeline.py`, `app.py`, `burst.py` | S5 | `run_ticket(subject, body)` |
+| `src/pipeline.py`, `app.py`, `burst.py`, `mocks.py`, `examples.py`, run scripts, `docs/demo_script.md` | Niti | `run_ticket(subject, body)` |
+| `src/config.py`, `src/contracts.py`, `tests/test_contracts.py` | The team | shared constants and the frozen stage contracts |
 
 Return shapes are documented at the top of each module; every stub already returns them, so the app runs from minute one.
 - `triage` -> `{language, type, queue, priority, conf:{type,queue,priority}, overall_conf, outage_terms}`; `overall_conf = min(type conf, queue conf)`
@@ -37,6 +55,30 @@ Return shapes are documented at the top of each module; every stub already retur
 - `decide` -> `{escalate, reasons, codes}`; `draft_reply` -> `{text, cited_ids, warnings, used_fallback, llm_error}` (`codes` and `llm_error` are additive)
 - `run_ticket` -> `{triage, hits, gate, draft(+for_review), latency}`; latency keys (ms): `triage_ms, retrieve_ms, gate_ms, generate_ms, total_ms`
 - Two-stage escalation: `decide()` runs before generation; any draft `warnings` afterwards also escalate. Escalated tickets still get a draft, labelled "for engineer review".
+- These shapes are enforced in code by `src/contracts.py` (used by `--check` and `tests/test_pipeline.py`).
+
+## Architecture
+```
+subject, body ─► triage (S2) ─► retrieve top-k from KB index (S3) ─► gate.decide (S4) ─┐
+                 lang/type/queue/        resolved historical tickets      rules: high Incident,  │
+                 priority + conf         (never the holdout)              low conf, no precedent │
+                                                                                                 ▼
+   console (Niti) ◄─ escalate? + reasons ◄── grounding warnings also escalate ◄── draft_reply (S4)
+   + burst detector                                                               on PII-masked text,
+                                                                                  cites [TKT-…] only
+```
+- `src/pipeline.py` is the only glue: it times each stage (`config.LATENCY_KEYS`), masks PII (`src/pii.py`) before
+  generation, applies the post-generation escalation, and falls back to `src/mocks.py` per stage when one isn't ready.
+- `app.py` is a thin Streamlit layer: triage console, live queue and major-incident banner. All thresholds come from `src/config.py`.
+
+## Major-incident detection
+`src/burst.py` keeps a rolling window of recent tickets (10 with e5, 20 with the fallback). Each new ticket is compared with the window, and if at least 3
+(including the new one) are similar, the console shows one **MAJOR INCIDENT SUSPECTED** banner and escalates those
+tickets with the reason "Possible major incident". When S3's index is built, similarity uses the same multilingual e5 encoder as retrieval (`embed_texts`, one model
+in memory), so English and German reports of one outage are grouped: threshold 0.91, window 10, tuned on the demo outage
+plus 300 random KB validation tickets (fires on the 3rd report; ~4% false alarms on real tickets). Without the index it falls
+back to character 3–5-gram hashing (threshold 0.30, window 20, same-language only). Burst state lives only in the console session;
+`run_ticket()` stays stateless, so `evaluate.py` is unaffected.
 
 ## Data rules (zero leakage)
 - All data goes through `src/data.py`. The holdout `answer` column is never written to disk; holdout inputs
@@ -304,3 +346,12 @@ _S1 fills in after `python evaluate.py` with the real gate and retrieval._
 Dataset: [Tobi-Bueck/customer-support-tickets](https://huggingface.co/datasets/Tobi-Bueck/customer-support-tickets) on Hugging Face,
 licensed CC BY-NC 4.0 (attribution, non-commercial). SentinelDesk is a hackathon project and is not for commercial use. The data
 is not redistributed in this repository (`data/` is gitignored).
+
+## Limitations
+- Only English and German are supported (the only languages in the dataset).
+- Outage detection: the dataset's tickets are very repetitive, so with e5 about 4% of ordinary tickets still trigger a false
+  alarm (measured on 300 KB validation tickets). Without the index, the fallback only groups same-language reports.
+  Burst state is per console session and is lost on restart.
+- Demo stand-ins (`src/mocks.py`) are keyword heuristics for showing the flow only; their output is never reported as results.
+- PII masking is pattern-based (S4: emails, IBANs, cards, IPs, phones, account ids). Personal names and street addresses are not masked.
+- Escalation thresholds are tuned on the validation slice of one public dataset and may need retuning on real traffic.
