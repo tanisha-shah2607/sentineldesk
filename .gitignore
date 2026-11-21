@@ -11,3 +11,6 @@ results/
 .pytest_cache/
 .claude/
 *.zip
+
+# Streamlit secrets (never commit)
+.streamlit/secrets.toml
