@@ -50,6 +50,13 @@ def check(case: dict) -> dict:
 
 
 def main(as_json: bool) -> int:
+    import os
+    from src import retrieval
+    if os.getenv("RETRIEVAL_STUB") != "1" and hasattr(retrieval, "index_ready") and not retrieval.index_ready():
+        print("The retrieval index is not built, so the pipeline cannot run.\n"
+              "Run: python scripts/build_index.py   (needs torch + sentence-transformers; ~2 min on GPU)\n"
+              "or set RETRIEVAL_STUB=1 to run against the fixed stub hit (checks wiring only, not quality).")
+        return 2
     cases = json.loads((ROOT / "eval" / "adversarial.json").read_text(encoding="utf-8"))
     results = [check(c) for c in cases]
     n_fail = sum(bool(r["fails"]) for r in results)
