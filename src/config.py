@@ -27,7 +27,9 @@ VALID_PRIORITIES = ["high", "medium", "low"]   # dataset also has critical/very_
 
 # Gate thresholds (S4 tunes on the shared VAL slice; S3 supplies the score scale)
 CONF_THRESHOLD = 0.50        # overall_conf below this -> escalate
-SIM_THRESHOLD = 0.55         # top retrieval score below this -> escalate
+SIM_THRESHOLD = 0.85         # top retrieval score below this -> escalate. From S3's scripts/tune_threshold.py:
+                             # e5 scores sit in ~0.75-0.95; 0.85 flags none of 19 hand-typed in-scope tickets
+                             # and 0% of val, and catches 12/17 off-topic ones
 TOP_K = 5
 
 # Latency keys returned by run_ticket()["latency"], all in milliseconds

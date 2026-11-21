@@ -13,8 +13,7 @@ python-dotenv>=1.0
 requests>=2.31
 pytest>=8.0
 matplotlib>=3.8
-# S4: install ONE LLM client you choose
-# anthropic>=0.40
-# openai>=1.30
+# S4: Claude client; the [vertex] extra adds google-auth for LLM_PROVIDER=vertex. ollama needs only `requests`.
+anthropic[vertex]>=2.12
 # S2 optional
 # lightgbm>=4.3
