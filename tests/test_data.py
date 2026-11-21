@@ -70,6 +70,6 @@ def test_shared_val_slice():
 
 def test_literal_backslash_n_unescaped():
     from src.text import unescape
-    t = build_text("Hallo", "Sehr geehrt,\n\nich schreibe")
-    assert "\n" not in t and "\n\nich" in t
-    assert unescape(None) == "" and unescape("a\nb") == "a\nb"
+    t = build_text("Hallo", r"Sehr geehrt,\n\nich schreibe")   # raw string: literal backslash + n
+    assert "\\n" not in t and "\n\nich" in t
+    assert unescape(None) == "" and unescape(r"a\nb") == "a\nb"
