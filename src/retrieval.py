@@ -33,6 +33,7 @@ automatically when index/ has not been built).
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 
 import numpy as np
@@ -148,6 +149,31 @@ def load_kb_embeddings() -> tuple[np.ndarray, "pd.DataFrame"]:  # noqa: F821
 
 # ---------------------------------------------------------------- index
 
+# --- Generic answers --------------------------------------------------------------------------
+# Some KB "resolutions" contain no resolution: "call", "Sorry", "To better assist you, could you please
+# provide more details about the issue you are facing?" (TKT-07586), "I will address the issue and call
+# you back at <tel_num> shortly" (TKT-33547). Their vague text sits close to many vague queries, so they
+# end up as top hits and the reply quotes nothing useful. They are left out of the index (~6-7% of it).
+MIN_ANSWER_CHARS = 80        # below this, no answer in the KB holds an actual resolution
+GENERIC_MAX_CHARS = 150      # short answers that only ask for details / promise contact are generic too
+_GENERIC_ANSWER = re.compile(
+    r"\b((provide|share|send|give|add)( us)? (more|additional|further) (details|information|info)|"
+    r"(more|further|additional) (details|information)|could you (please )?(clarify|describe|explain)|"
+    r"call you( back)?|contact (us|you)|reach (out|us)|get back to you|get in touch|follow up|"
+    r"will (address|look into|investigate|review|check)|"
+    r"(weitere|mehr|zusätzliche|genauere|nähere) (details|informationen|angaben)|"
+    r"(können|könnten) sie .{0,40}(beschreiben|erläutern|mitteilen|angeben)|"
+    r"(rufen|melden) (wir|sie|uns)|rückruf|kontaktieren sie|kontaktieren uns|anrufen|"
+    r"wird (geprüft|bearbeitet|untersucht)|werden .{0,30}(prüfen|untersuchen))|<tel_num>", re.IGNORECASE)
+
+
+def is_generic_answer(answer) -> bool:
+    """True if a KB answer holds no actual resolution (too short, or short and only asks for details /
+    promises a call). Such tickets are excluded from the index."""
+    text = unescape(answer).strip()
+    return len(text) < MIN_ANSWER_CHARS or (len(text) < GENERIC_MAX_CHARS and bool(_GENERIC_ANSWER.search(text)))
+
+
 def _dedupe_positions(meta) -> np.ndarray:
     """Row positions to keep: one ticket per normalised body (`_body`), the lowest ticket_id.
     `meta` must have a 0..n-1 RangeIndex so index labels are row positions."""
@@ -169,6 +195,11 @@ def build_index(part: str = "all") -> dict:
     meta["_body"] = _norm_body(body).to_numpy()
     meta["_raw_body"] = body.to_numpy()
 
+    # Drop generic answers BEFORE de-duplicating, so a duplicate with a real answer can take its place.
+    informative = ~meta["answer"].map(is_generic_answer).to_numpy()
+    n_generic = int((~informative).sum())
+    emb, meta = emb[informative], meta[informative].reset_index(drop=True)
+
     keep = _dedupe_positions(meta)
     emb = np.ascontiguousarray(emb[keep])
     meta = meta.iloc[keep].reset_index(drop=True)
@@ -185,7 +216,8 @@ def build_index(part: str = "all") -> dict:
     _load.cache_clear()
     _lang_positions.cache_clear()
     stats = {"part": part, "selected": int(sel.sum()), "indexed": int(len(emb)),
-             "duplicates_dropped": int(sel.sum() - len(emb))}
+             "generic_answers_dropped": n_generic,
+             "duplicates_dropped": int(sel.sum() - n_generic - len(emb))}
     print(f"Built {_vec_path(part).name}: {stats}")
     return stats
 
