@@ -2,6 +2,9 @@
 import os
 
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()  # read .env before the sidebar shows LLM settings (src/llm.py otherwise loads it only on the first call)
 
 from src import config as C
 from src.burst import BurstDetector
@@ -105,8 +108,11 @@ with st.sidebar:
             st.markdown(f"{'🟢' if v == 'live' else '🔴' if v.startswith('mock') else '🟡'} **{s}**: {v}")
     else:
         st.caption("Run a ticket to see which stages are live.")
-    provider = os.getenv("LLM_PROVIDER") or "none (template replies)"
-    st.markdown(f"**LLM:** {provider}")
+    provider = (os.getenv("LLM_PROVIDER") or "none").strip()
+    if provider == "none":
+        st.markdown("**LLM:** none (template replies)")
+    else:
+        st.markdown(f"**LLM:** {provider}" + (f" · `{os.getenv('LLM_MODEL')}`" if os.getenv("LLM_MODEL") else ""))
     tm = WARM["triage_model"]
     st.markdown("**Triage model:** " + ("trained" if tm else "not trained, run `python scripts/train_triage.py`"))
     st.markdown("**Retrieval index:** " + ("ready" if WARM["index_ready"] else "not built, run `python scripts/build_index.py`"))
