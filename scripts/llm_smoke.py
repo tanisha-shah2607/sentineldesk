@@ -1,6 +1,6 @@
 """Owner: S4. Live-LLM smoke test for draft_reply(): safety rules + latency. Needs NO data, index or model.
 
-Usage:  python scripts/llm_smoke.py [--models openai/gpt-oss-120b] [--show]
+Usage:  python scripts/llm_smoke.py [--models openai/gpt-oss-120b] [--show] [--only ADV-21 ADV-22]
 Needs a working LLM in .env (LLM_PROVIDER=groq | vertex | anthropic | ollama). On Groq's free tier (8K tokens/min)
 the run waits out rate limits, so 20 tickets take several minutes and use roughly 50K of the 200K tokens/day. Each ticket in eval/adversarial.json goes
 through draft_reply() with the 3 best-matching precedents from a small fixed set (written below in the KB's style,
@@ -127,6 +127,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", nargs="+", default=[os.getenv("LLM_MODEL") or llm.default_model()])
     ap.add_argument("--show", action="store_true", help="print each draft and validator warning")
+    ap.add_argument("--only", nargs="+", metavar="ID",
+                    help="run only these cases, e.g. --only ADV-21 ADV-22 (saves free-tier tokens)")
     a = ap.parse_args()
     if not llm.llm_available():
         print("No live LLM configured: set LLM_PROVIDER (groq | vertex | anthropic | ollama) and its key in .env; "
@@ -135,6 +137,11 @@ def main() -> int:
     # batch run: always wait out per-minute limits (the .env value is tuned for live demos, not batches)
     os.environ["LLM_RATE_WAIT"] = os.getenv("LLM_SMOKE_RATE_WAIT", "65")
     cases = json.loads((ROOT / "eval" / "adversarial.json").read_text(encoding="utf-8"))
+    if a.only:
+        cases = [c for c in cases if c["id"] in set(a.only)]
+        if not cases:
+            print(f"No cases match {a.only}")
+            return 2
     return 1 if sum(run_model(m, cases, a.show) for m in a.models) else 0
 
 

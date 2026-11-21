@@ -102,7 +102,7 @@ OK_PAYLOAD = {"choices": [{"message": {"content": "Hello [TKT-00001]", "reasonin
 def groq_env(monkeypatch, key="test-key"):
     monkeypatch.setenv("LLM_PROVIDER", "groq")
     monkeypatch.setenv("GROQ_API_KEY", key)
-    for k in ("LLM_MODEL", "LLM_EFFORT", "LLM_RATE_WAIT"):
+    for k in ("LLM_MODEL", "LLM_EFFORT", "LLM_RATE_WAIT", "LLM_BATCH_RATE_WAIT", "SENTINELDESK_STRICT"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -161,4 +161,22 @@ def test_groq_missing_key_http_error_and_empty_reply(monkeypatch):
     empty = {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}
     monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResp(200, empty))
     with pytest.raises(llm.LLMError, match="length"):
+        llm.llm_complete("p")
+
+
+def test_groq_batch_mode_waits_out_long_rate_limit(monkeypatch):
+    """evaluate.py / run_adversarial.py set SENTINELDESK_STRICT=1: wait out the per-minute limit instead of
+    falling back to the template, which would silently distort the evaluation numbers."""
+    groq_env(monkeypatch)
+    monkeypatch.setenv("SENTINELDESK_STRICT", "1")
+    monkeypatch.setenv("LLM_RATE_WAIT", "10")   # the live-demo value from .env must not cap batch runs
+    responses = [FakeResp(429, headers={"retry-after": "45"}), FakeResp(200, OK_PAYLOAD)]
+    monkeypatch.setattr(requests, "post", lambda *a, **k: responses.pop(0))
+    slept = []
+    monkeypatch.setattr(llm.time, "sleep", slept.append)
+    assert llm.llm_complete("p") == "Hello [TKT-00001]"
+    assert slept == [45.0]
+    monkeypatch.setenv("LLM_BATCH_RATE_WAIT", "30")   # configurable: 45 s is now too long even for batch
+    responses[:] = [FakeResp(429, headers={"retry-after": "45"})]
+    with pytest.raises(llm.LLMError, match="rate limit"):
         llm.llm_complete("p")
