@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Owner: Niti. Proves the repo works from a clean checkout, the way a judge would run it.
-# Usage: scripts/fresh_clone_test.sh [--light] [git-ref]
+# Usage: scripts/fresh_clone_test.sh [--light|--full] [git-ref]
 #   --light   install only what tests + console need (skips torch/sentence-transformers; triage + retrieval run as stubs)
+#   --full    also download the data, train S2's model and build S3's index in the clone (~10-15 min), i.e. the
+#             exact first-run path of the presenting machine
 #   git-ref   branch/commit to test (default: current HEAD, including only COMMITTED changes)
 set -euo pipefail
 
-LIGHT=0
+LIGHT=0; FULL=0
 if [[ "${1:-}" == "--light" ]]; then LIGHT=1; shift; fi
+if [[ "${1:-}" == "--full" ]]; then FULL=1; shift; fi
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 REF="${1:-$(git -C "$REPO" rev-parse HEAD)}"
 PY="${PYTHON:-}"
@@ -28,6 +31,11 @@ if [[ $LIGHT == 1 ]]; then
   .venv/bin/pip install -q pandas pyarrow fastparquet scikit-learn joblib numpy langdetect streamlit python-dotenv requests pytest
 else
   .venv/bin/pip install -q -r requirements.txt
+fi
+
+if [[ $FULL == 1 ]]; then
+  echo "== prepare: data split, triage model, retrieval index"
+  .venv/bin/python scripts/prepare.py --split --train --index
 fi
 
 echo "== pytest"

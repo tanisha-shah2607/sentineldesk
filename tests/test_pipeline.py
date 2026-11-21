@@ -141,3 +141,12 @@ def test_mock_scores_follow_sim_threshold():
     from src.config import SIM_THRESHOLD
     good = mocks.mock_retrieve("VPN connection drops, reinstall the VPN client and reconnect")[0]
     assert good["score"] >= SIM_THRESHOLD
+
+
+def test_placeholder_outputs_are_not_live(monkeypatch, tmp_path):
+    import src.triage as T
+    monkeypatch.setattr(T, "MODEL_PATH", tmp_path / "missing.joblib")
+    monkeypatch.setenv("RETRIEVAL_STUB", "1")
+    _, status = P.run_ticket_verbose(None, "My VPN is down")
+    assert status["triage"].startswith("placeholder")
+    assert status["retrieve"].startswith("placeholder")

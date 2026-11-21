@@ -6,8 +6,9 @@ Multilingual incident triage, smart escalation, and precedent-grounded reply cop
 ```
 python -m venv .venv
 .venv\Scripts\activate          # Windows
+source .venv/bin/activate       # macOS / Linux
 pip install -r requirements.txt
-copy .env.example .env          # then fill in LLM settings (S4)
+copy .env.example .env          # Windows (macOS/Linux: cp .env.example .env); then fill in LLM settings (S4)
 python scripts/make_split.py    # prints row count + fingerprint; aborts if your dataset differs from the team's
 python scripts/train_triage.py  # triage classifier (~1.5 min) -> models/triage.joblib, prints validation metrics
 python scripts/build_index.py   # embeds the KB once into index/ (~2 min on Apple GPU, longer on CPU)
@@ -19,12 +20,13 @@ Do not `pip freeze > requirements.txt` in PowerShell (writes UTF-16). Edit requi
 ## Run it
 | What | Command |
 |---|---|
-| Launch the console (creates `.venv` on first run) | `./run.sh` (macOS/Linux) · `run.bat` (Windows) |
+| Launch the console (first run also creates `.venv`, the data split, triage model and index) | `./run.sh` (macOS/Linux) · `run.bat` (Windows) |
+| After `git pull` when a teammate changed the model or index | `./run.sh --rebuild` · `run.bat --rebuild` |
 | Fresh machine: data + triage model + index, then readiness check | `python scripts/prepare.py --split --train --index` |
 | Deploy to Cloud Run | [`docs/deploy_cloud_run.md`](docs/deploy_cloud_run.md) (`Dockerfile`) |
 | Contract smoke test on demo tickets | `python -m src.pipeline --check` |
 | One ticket from the CLI | `python -m src.pipeline --subject "VPN" --body "VPN drops every 10 min"` |
-| Clean-checkout test (what a judge sees) | `scripts/fresh_clone_test.sh [--light]` |
+| Clean-checkout test (what a judge sees) | `scripts/fresh_clone_test.sh [--light \| --full]` |
 
 Stages that raise `NotImplementedError` (or error) fall back to labelled demo stand-ins from `src/mocks.py`, so the
 console always runs; the sidebar's **System status** shows which stages are live. `SENTINELDESK_STRICT=1` re-raises

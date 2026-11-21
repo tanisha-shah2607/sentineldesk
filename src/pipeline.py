@@ -10,6 +10,10 @@ Resilience (so the console works before every stage is finished):
   - Any other stage error also falls back to the mock, unless strict mode is on
     (SENTINELDESK_STRICT=1, or run_ticket(..., strict=True)), in which case it is re-raised.
   - SENTINELDESK_FORCE_MOCKS=triage,retrieve,gate,generate (or "all") forces mocks for UI rehearsal.
+  - A stage that answers but with a teammate's documented placeholder (triage without models/triage.joblib,
+    retrieval in RETRIEVAL_STUB mode) is reported as "placeholder (...)", never as "live".
+  Status values: "live" | "placeholder (...)" | "mock (...)". Anything but "live" makes the console show a banner;
+  evaluate.py / run_adversarial.py run with SENTINELDESK_STRICT=1 and warn on any non-live stage.
   run_ticket_verbose() also returns which implementation each stage used; run_ticket() keeps the frozen shape.
 
 PII: subject/body are masked with src.pii.mask_pii before draft_reply (the only stage that may call an
@@ -59,6 +63,23 @@ def _forced() -> set[str]:
     return set(STAGES) if v == "all" else {s.strip() for s in v.split(",") if s.strip()}
 
 
+def _placeholder(stage: str, out) -> str | None:
+    """Detect teammates' documented placeholder modes, so they can't pass as live."""
+    try:
+        if stage == "triage":
+            from .triage import MODEL_PATH
+            if not MODEL_PATH.exists():
+                return "placeholder (triage model not trained: run python scripts/train_triage.py)"
+        if stage == "retrieve":
+            stub = os.getenv("RETRIEVAL_STUB") == "1" or any(
+                isinstance(h, dict) and h.get("subject") == "(stub)" for h in (out or []))
+            if stub:
+                return "placeholder (retrieval stub: run python scripts/build_index.py)"
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _call(stage: str, args: tuple, status: dict, strict: bool):
     """Run the real stage, or its mock. Records 'live' | 'mock (...)' in status[stage]."""
     if stage in _forced():
@@ -66,7 +87,7 @@ def _call(stage: str, args: tuple, status: dict, strict: bool):
         return _MOCK[stage](*args)
     try:
         out = _real(stage)(*args)
-        status[stage] = "live"
+        status[stage] = _placeholder(stage, out) or "live"
         return out
     except NotImplementedError:
         status[stage] = "mock (not implemented)"
@@ -129,6 +150,12 @@ def check() -> int:
     items = [(e["name"], e["subject"], e["body"], e.get("expect_precedent")) for e in EXAMPLES]
     items += [(f"burst #{i + 1}", e["subject"], e["body"], None) for i, e in enumerate(OUTAGE_BURST)]
     items += [("edge: NaN subject, None body", float("nan"), None, None), ("edge: empty", "", "", None)]
+    try:  # load S3's model/index once so per-ticket latencies are realistic (the app does this at startup)
+        from .retrieval import index_ready, warmup
+        if index_ready():
+            warmup()
+    except Exception:  # noqa: BLE001
+        pass
     failures, statuses, notes = 0, {}, []
     for name, s, b, expect in items:
         try:

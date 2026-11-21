@@ -36,16 +36,6 @@ def warm_up() -> dict:
     return info
 
 
-@st.cache_data(max_entries=2000, show_spinner=False)
-def answer_language(text: str) -> str:
-    """The dataset's language column is wrong on ~11% of tickets (S2), so show the detected language."""
-    try:
-        from src.triage import detect_language
-        return detect_language(unescape(text))
-    except Exception:  # noqa: BLE001
-        return "?"
-
-
 WARM = warm_up()
 
 # ---------------------------------------------------------------- session state
@@ -111,7 +101,7 @@ with st.sidebar:
     if ss.stage_status:
         for s in STAGES:
             v = ss.stage_status.get(s, "?")
-            st.markdown(f"{'🟢' if v == 'live' else '🟡'} **{s}**: {v}")
+            st.markdown(f"{'🟢' if v == 'live' else '🔴' if v.startswith('mock') else '🟡'} **{s}**: {v}")
     else:
         st.caption("Run a ticket to see which stages are live.")
     provider = os.getenv("LLM_PROVIDER") or "none (template replies)"
@@ -129,6 +119,9 @@ with st.sidebar:
                     f"- Precedents retrieved: **{C.TOP_K}**\n"
                     f"- Burst: ≥ **{ss.detector.min_cluster}** similar in last **{ss.detector.window}** "
                     f"(sim ≥ {ss.detector.sim_threshold})")
+
+# not-live banner: slot reserved here, filled at the end of the script (after this run's ticket is processed)
+banner_slot = st.empty()
 
 # ---------------------------------------------------------------- major-incident banner
 active = next((h for h in ss.history if h["burst"]["burst"]), None)
@@ -169,9 +162,8 @@ with tab_console:
         else:
             st.success("### ✅ AUTO-DRAFT READY: agent can review and send")
 
-        mocked = [s for s, v in status.items() if v != "live"]
-        if mocked:
-            st.info("Demo fallback in use for: " + ", ".join(f"**{s}** ({status[s]})" for s in mocked))
+        if draft.get("used_fallback") and draft.get("llm_error"):
+            st.info(f"Draft is S4's template fallback (LLM not used: {draft['llm_error']}).")
 
         m = st.columns(6)
         m[0].metric("Language", tri["language"].upper())
@@ -187,7 +179,7 @@ with tab_console:
             st.markdown(unescape(draft["text"]))
             cap = "Cited: " + (", ".join(draft["cited_ids"]) or "none")
             if draft["used_fallback"]:
-                cap += " · template fallback"
+                cap += " · template fallback" + (f" ({draft['llm_error']})" if draft.get("llm_error") else "")
             st.caption(cap)
             for w in draft["warnings"]:
                 st.warning(w)
@@ -204,7 +196,7 @@ with tab_console:
         st.subheader("Retrieved precedents")
         if hits:
             st.dataframe([{"ticket": h["ticket_id"], "similarity": round(float(h["score"]), 3),
-                           "lang": answer_language(h["answer"]), "queue": h["queue"], "type": h["type"],
+                           "lang": h["language"], "queue": h["queue"], "type": h["type"],
                            "subject": h["subject"], "answer": unescape(h["snippet"])} for h in hits],
                          hide_index=True, **FULL_WIDTH)
         else:
@@ -247,3 +239,15 @@ with tab_about:
 
 Stages that aren't ready yet fall back to clearly labelled demo stand-ins (see *System status*).
 """)
+
+# ---------------------------------------------------------------- not-live banner (S1: never show stand-ins silently)
+not_live = {s: v for s, v in ss.stage_status.items() if v != "live"}
+if not ss.stage_status:  # before the first ticket: predict from the warm-up
+    if not WARM["triage_model"]:
+        not_live["triage"] = "placeholder (triage model not trained)"
+    if not WARM["index_ready"]:
+        not_live["retrieve"] = "retrieval index not built"
+if not_live:
+    banner_slot.warning("⚠️ **NOT ALL STAGES ARE LIVE.** Output from these stages is a placeholder or demo stand-in, "
+               "not model output: " + "; ".join(f"**{s}**: {v}" for s, v in not_live.items())
+               + ". Fix with `./run.sh --rebuild` (or set SENTINELDESK_STRICT=1 to fail loudly).")

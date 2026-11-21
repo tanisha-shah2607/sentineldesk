@@ -1,7 +1,7 @@
 # SentinelDesk demo script (~4 minutes)
 
 **Before going on stage**
-- `git pull`, then `python scripts/prepare.py --train --index` (first time on a machine also add `--split`). It should print `READY`.
+- `git pull`, then `./run.sh --rebuild` (Windows: `run.bat --rebuild`). It retrains/re-indexes, prints `READY`, and opens the console.
   The sidebar must show **Triage model: trained** and **Retrieval index: ready** before you start.
 - `./run.sh` (or `run.bat`). Open http://localhost:8501 and press **Reset queue**.
 - Check the sidebar **System status**: green = real stage, yellow = demo stand-in. Say which is which if asked; never present mock output as model results.

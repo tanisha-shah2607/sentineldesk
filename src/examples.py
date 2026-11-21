@@ -1,6 +1,8 @@
 """Owner: Niti. Hand-written demo tickets (NOT from the dataset, so no leakage risk).
 
 EXAMPLES feed the console's example picker and `python -m src.pipeline --check`.
+ADVERSARIAL_DEMO_IDS are S1's adversarial cases (eval/adversarial.json, also hand-written, not dataset rows) that S1
+asked to show in the console; they are appended to EXAMPLES from that file so the wording has one source.
 OUTAGE_BURST is a run of near-duplicate reports (en + de) used to demo major-incident detection.
 """
 
@@ -38,6 +40,23 @@ EXAMPLES = [
      "body": "Wir vermuten ein Datenleck: unbekannte Anmeldungen an unseren Admin-Konten aus dem Ausland.",
      "expect_precedent": "TKT-14289"},
 ]
+
+ADVERSARIAL_DEMO_IDS = ["ADV-01", "ADV-02", "ADV-05", "ADV-07"]
+
+
+def _adversarial_examples() -> list[dict]:
+    import json
+    from pathlib import Path
+    path = Path(__file__).resolve().parent.parent / "eval" / "adversarial.json"
+    try:
+        cases = {c["id"]: c for c in json.loads(path.read_text(encoding="utf-8"))}
+    except Exception:  # noqa: BLE001  (file missing/changed: the console still works without these)
+        return []
+    return [{"name": f"{i}: {cases[i]['note']}", "subject": cases[i]["subject"],
+             "body": cases[i]["body"] * cases[i].get("repeat", 1)} for i in ADVERSARIAL_DEMO_IDS if i in cases]
+
+
+EXAMPLES += _adversarial_examples()
 
 OUTAGE_BURST = [
     {"subject": "Cannot log in", "body": "Login page shows error 500 since 9:05, nobody on our team can log in."},
