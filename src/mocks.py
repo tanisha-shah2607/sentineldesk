@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from .config import TOP_K
+from .config import SIM_THRESHOLD, TOP_K
 from .text import build_text
 
 _DE_HINTS = {"der", "die", "das", "und", "nicht", "ist", "ich", "wir", "bitte", "seit", "kann", "keine", "mit",
@@ -94,7 +94,8 @@ def mock_retrieve(text: str, k: int = TOP_K) -> list[dict]:
     for tid, subj, queue, typ, lang, ans in _KB:
         d = _content(subj + " " + ans)
         cos = len(q & d) / ((len(q) * len(d)) ** 0.5 or 1)
-        score = min(0.95, 0.30 + 2 * cos) if cos else 0.0  # stretched so good matches clear SIM_THRESHOLD
+        # stretched relative to config.SIM_THRESHOLD so good matches clear it (0.55 today, 0.85 after S4 merges)
+        score = min(0.99, SIM_THRESHOLD - 0.25 + 2 * cos) if cos else 0.0
         hits.append({"ticket_id": tid, "score": round(min(score, 0.99), 4), "subject": subj, "answer": ans,
                      "snippet": ans[:300], "queue": queue, "type": typ, "language": lang})
     hits.sort(key=lambda h: h["score"], reverse=True)

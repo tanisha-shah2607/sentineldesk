@@ -128,3 +128,16 @@ def test_burst_custom_embedder():
     assert d.sim_threshold == 0.80
     d.add("a"); d.add("a")
     assert d.add("a")["burst"] and not d.add("b")["burst"]
+
+
+def test_burst_auto_falls_back_without_index(monkeypatch):
+    import src.retrieval as R
+    monkeypatch.setattr(R, "index_ready", lambda: False)
+    d = BurstDetector.auto()
+    assert d.backend == "char n-gram hashing" and d.sim_threshold == 0.30
+
+
+def test_mock_scores_follow_sim_threshold():
+    from src.config import SIM_THRESHOLD
+    good = mocks.mock_retrieve("VPN connection drops, reinstall the VPN client and reconnect")[0]
+    assert good["score"] >= SIM_THRESHOLD

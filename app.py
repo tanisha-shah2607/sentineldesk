@@ -15,9 +15,42 @@ st.set_page_config(page_title="SentinelDesk", page_icon="🛡️", layout="wide"
 _ST_VER = tuple(int(x) for x in st.__version__.split(".")[:2])
 FULL_WIDTH = {"width": "stretch"} if _ST_VER >= (1, 50) else {"use_container_width": True}
 
+
+
+@st.cache_resource(show_spinner="Loading models and retrieval index…")
+def warm_up() -> dict:
+    """Once per server process: load S2's model and S3's index/encoder so the first ticket is fast."""
+    info = {"triage_model": None, "index_ready": False, "warmup_error": None}
+    try:
+        from src.triage import model_info
+        info["triage_model"] = model_info()
+    except Exception as e:  # noqa: BLE001
+        info["warmup_error"] = f"triage: {type(e).__name__}"
+    try:
+        from src.retrieval import index_ready, warmup
+        info["index_ready"] = index_ready()
+        if info["index_ready"]:
+            warmup()
+    except Exception as e:  # noqa: BLE001
+        info["warmup_error"] = f"retrieval: {type(e).__name__}: {e}"
+    return info
+
+
+@st.cache_data(max_entries=2000, show_spinner=False)
+def answer_language(text: str) -> str:
+    """The dataset's language column is wrong on ~11% of tickets (S2), so show the detected language."""
+    try:
+        from src.triage import detect_language
+        return detect_language(unescape(text))
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
+WARM = warm_up()
+
 # ---------------------------------------------------------------- session state
 ss = st.session_state
-ss.setdefault("detector", BurstDetector())
+ss.setdefault("detector", BurstDetector.auto())
 ss.setdefault("history", [])          # newest first: dicts with result, status, burst, subject, body
 ss.setdefault("subject", "")
 ss.setdefault("body", "")
@@ -83,6 +116,12 @@ with st.sidebar:
         st.caption("Run a ticket to see which stages are live.")
     provider = os.getenv("LLM_PROVIDER") or "none (template replies)"
     st.markdown(f"**LLM:** {provider}")
+    tm = WARM["triage_model"]
+    st.markdown("**Triage model:** " + ("trained" if tm else "not trained, run `python scripts/train_triage.py`"))
+    st.markdown("**Retrieval index:** " + ("ready" if WARM["index_ready"] else "not built, run `python scripts/build_index.py`"))
+    st.markdown(f"**Outage detector:** {ss.detector.backend}")
+    if WARM["warmup_error"]:
+        st.caption(f"Warm-up issue: {WARM['warmup_error']}")
 
     with st.expander("Thresholds (src/config.py)"):
         st.markdown(f"- Confidence < **{C.CONF_THRESHOLD}** → escalate\n"
@@ -125,6 +164,8 @@ with tab_console:
             st.error("### ⛔ ESCALATE TO ON-CALL ENGINEER")
             for reason in gate["reasons"]:
                 st.markdown(f"- {reason}")
+            if tri.get("outage_terms"):
+                st.markdown("- Outage wording detected: " + ", ".join(f"“{t}”" for t in tri["outage_terms"]))
         else:
             st.success("### ✅ AUTO-DRAFT READY: agent can review and send")
 
@@ -163,7 +204,7 @@ with tab_console:
         st.subheader("Retrieved precedents")
         if hits:
             st.dataframe([{"ticket": h["ticket_id"], "similarity": round(float(h["score"]), 3),
-                           "lang": h["language"], "queue": h["queue"], "type": h["type"],
+                           "lang": answer_language(h["answer"]), "queue": h["queue"], "type": h["type"],
                            "subject": h["subject"], "answer": unescape(h["snippet"])} for h in hits],
                          hide_index=True, **FULL_WIDTH)
         else:

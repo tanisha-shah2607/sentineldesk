@@ -22,6 +22,21 @@ EXAMPLES = [
              "The server at 10.20.30.40 rejects my password."},
     {"name": "How-to question (en)", "subject": "Export reports",
      "body": "How do I export the monthly usage report as a PDF?"},
+    # Cross-lingual demo (S3, wording from scripts/cross_lingual.py PAIRS): German tickets whose precedents
+    # include English tickets.
+    # expect_precedent = S3's expected top hit with the real index (checked by `--check` when the index is built).
+    {"name": "VPN ausgefallen (de, cross-lingual)", "subject": "VPN ausgefallen",
+     "body": "Unser Site-to-Site-VPN ist seit heute Morgen ausgefallen. Mitarbeiter im Homeoffice erreichen das Klinik-EMR-System nicht.",
+     "expect_precedent": "TKT-26021"},
+    {"name": "App stürzt ab (de, cross-lingual)", "subject": "App stürzt ab",
+     "body": "Nach dem letzten Software-Update stürzt die Anwendung beim Start ab.",
+     "expect_precedent": "TKT-41866"},
+    {"name": "Doppelt belastet (de, cross-lingual)", "subject": "Doppelt belastet",
+     "body": "Ich wurde diesen Monat doppelt für mein Abonnement belastet, bitte prüfen Sie meine Rechnung.",
+     "expect_precedent": "TKT-20534"},
+    {"name": "Datenleck (de, cross-lingual)", "subject": "Datenleck",
+     "body": "Wir vermuten ein Datenleck: unbekannte Anmeldungen an unseren Admin-Konten aus dem Ausland.",
+     "expect_precedent": "TKT-14289"},
 ]
 
 OUTAGE_BURST = [

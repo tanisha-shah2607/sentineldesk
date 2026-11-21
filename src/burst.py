@@ -4,9 +4,11 @@ Idea: one outage produces many near-duplicate tickets in a short time. Each new 
 the last `window` tickets; if at least `min_cluster` of them (counting the new one) are similar, we flag a
 probable major incident so the on-call engineer handles it once instead of N times.
 
-Default similarity: character 3-5-gram hashing vectors (no fitting, no model download, works on German
-compounds). Cross-lingual matching needs a multilingual embedder: pass embed_fn (e.g. S3's encoder,
-returning L2-normalised vectors) and a matching sim_threshold.
+Similarity backends:
+  - BurstDetector.auto(): S3's multilingual e5 encoder (src.retrieval.embed_texts) when the retrieval index
+    is built, so the app loads one model and English + German reports of one outage are grouped.
+  - Fallback: character 3-5-gram hashing vectors (no model, no fitting; same-language matches only).
+  - Or pass any embed_fn returning vectors, plus a matching sim_threshold.
 Thresholds were checked on src/examples.py: same-outage English reports score 0.35-0.59, unrelated
 tickets <= 0.19 (so the default is 0.30).
 """
@@ -19,6 +21,11 @@ import numpy as np
 
 DEFAULT_HASH_THRESHOLD = 0.30
 DEFAULT_EMBED_THRESHOLD = 0.80
+# For S3's e5 vectors (scores sit in a narrow 0.85-0.95 band). Tuned on the demo outage + 300 random KB val
+# tickets streamed through the detector: fires on the 3rd outage report (also mixed into real traffic, and
+# for the German report); ~4% false alarms on real tickets, which are highly repetitive (generated dataset).
+E5_THRESHOLD = 0.91
+E5_WINDOW = 10
 
 
 class BurstDetector:
@@ -32,6 +39,24 @@ class BurstDetector:
         self._recent: deque = deque(maxlen=window)  # (ticket_id, text, vector, ts)
         self._n = 0
         self._vec = None
+        self.backend = "custom embed_fn" if embed_fn else "char n-gram hashing"
+
+    @classmethod
+    def auto(cls, **kw) -> "BurstDetector":
+        """Use S3's shared e5 encoder if the retrieval index is built here, else the hashing fallback."""
+        try:
+            from .retrieval import embed_texts, index_ready
+            if index_ready():
+                kw.setdefault("sim_threshold", E5_THRESHOLD)
+                kw.setdefault("window", E5_WINDOW)
+                det = cls(embed_fn=lambda t: embed_texts([t])[0], **kw)
+                det.backend = "e5 (shared with retrieval)"
+                return det
+        except Exception:  # noqa: BLE001  (torch/sentence-transformers missing etc.)
+            pass
+        det = cls(**kw)
+        det.backend = "char n-gram hashing"
+        return det
 
     def _embed(self, text: str) -> np.ndarray:
         if self.embed_fn is not None:

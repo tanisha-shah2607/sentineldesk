@@ -1,7 +1,8 @@
 # SentinelDesk demo script (~4 minutes)
 
 **Before going on stage**
-- `git pull`, then `python scripts/prepare.py` should print `READY`.
+- `git pull`, then `python scripts/prepare.py --train --index` (first time on a machine also add `--split`). It should print `READY`.
+  The sidebar must show **Triage model: trained** and **Retrieval index: ready** before you start.
 - `./run.sh` (or `run.bat`). Open http://localhost:8501 and press **Reset queue**.
 - Check the sidebar **System status**: green = real stage, yellow = demo stand-in. Say which is which if asked; never present mock output as model results.
 - If a real stage breaks on the day, rehearse with `SENTINELDESK_FORCE_MOCKS=all ./run.sh`.
@@ -15,8 +16,11 @@
 - Point at: type / queue / priority with confidence, the green **AUTO-DRAFT READY** banner.
 - Point at **Retrieved precedents** and the `[TKT-…]` citation in the draft: "Every sentence comes from a real resolved ticket. Nothing is invented."
 
-## 3. German ticket (30 s)
+## 3. German ticket + cross-lingual precedents (45 s)
 - **Rechnung falsch (de)**: language detected as DE, reply drafted in German.
+- **VPN ausgefallen (de, cross-lingual)**: escalates with *Outage wording detected: “ausgefallen”*.
+  Once S3's cross-lingual retrieval is merged, the precedents include English tickets (S3's demo pair: TKT-26021).
+  "One multilingual model: a German ticket can be answered from an English precedent."
 
 ## 4. Escalation (45 s)
 - **Production outage (en, high)**: red **ESCALATE** banner listing every rule that fired (e.g. high-priority Incident, no close precedent).
@@ -25,7 +29,7 @@
 
 ## 5. Major incident (45 s)
 - **Reset queue**, then **Simulate outage**: five near-identical login-error tickets arrive.
-- The 🚨 **MAJOR INCIDENT SUSPECTED** banner appears after the third. Open **Live queue** to see them grouped.
+- The 🚨 **MAJOR INCIDENT SUSPECTED** banner appears after the third, and the German report joins the same cluster. Open **Live queue** to see them grouped.
 - "Instead of five engineers chasing five tickets, on-call is paged once."
 
 ## 6. Numbers (30 s)

@@ -126,11 +126,11 @@ def check() -> int:
     """Smoke test: every example through the pipeline, every contract validated. Returns exit code."""
     from .examples import EXAMPLES, OUTAGE_BURST
 
-    items = [(e["name"], e["subject"], e["body"]) for e in EXAMPLES]
-    items += [(f"burst #{i + 1}", e["subject"], e["body"]) for i, e in enumerate(OUTAGE_BURST)]
-    items += [("edge: NaN subject, None body", float("nan"), None), ("edge: empty", "", "")]
-    failures, statuses = 0, {}
-    for name, s, b in items:
+    items = [(e["name"], e["subject"], e["body"], e.get("expect_precedent")) for e in EXAMPLES]
+    items += [(f"burst #{i + 1}", e["subject"], e["body"], None) for i, e in enumerate(OUTAGE_BURST)]
+    items += [("edge: NaN subject, None body", float("nan"), None, None), ("edge: empty", "", "", None)]
+    failures, statuses, notes = 0, {}, []
+    for name, s, b, expect in items:
         try:
             r, st = run_ticket_verbose(s, b)
             problems = validate_result(r)
@@ -145,12 +145,20 @@ def check() -> int:
             t = r["triage"]
             summary = (f"{t['language']} {t['type']}/{t['priority']} conf={t['overall_conf']:.2f} "
                        f"{'ESCALATE' if r['gate']['escalate'] else 'auto-draft'} {r['latency']['total_ms']:.0f}ms")
-        print(f"[{flag}] {name:32s} {summary}")
+        if expect and r and st.get("retrieve") == "live":
+            ids = [h["ticket_id"] for h in r["hits"]]
+            where = f"rank {ids.index(expect) + 1}" if expect in ids else "NOT in top-k"
+            notes.append(f"{name}: expected precedent {expect} -> {where} (top: {ids[:3]})")
+        print(f"[{flag}] {name:38s} {summary}")
         for p in problems:
             print(f"        - {p}")
     print("\nStage implementations used:")
     for k in STAGES:
         print(f"  {k:9s} {', '.join(sorted(statuses.get(k, {'?'})))}")
+    if notes:
+        print("\nCross-lingual demo precedents (informational):")
+        for n in notes:
+            print(f"  {n}")
     print(f"\n{len(items) - failures}/{len(items)} passed contract checks")
     return 1 if failures else 0
 

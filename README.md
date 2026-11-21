@@ -19,7 +19,8 @@ Do not `pip freeze > requirements.txt` in PowerShell (writes UTF-16). Edit requi
 | What | Command |
 |---|---|
 | Launch the console (creates `.venv` on first run) | `./run.sh` (macOS/Linux) · `run.bat` (Windows) |
-| Pre-demo readiness check | `python scripts/prepare.py` (`--split` / `--index` to build missing data/index) |
+| Fresh machine: data + triage model + index, then readiness check | `python scripts/prepare.py --split --train --index` |
+| Deploy to Cloud Run | [`docs/deploy_cloud_run.md`](docs/deploy_cloud_run.md) (`Dockerfile`) |
 | Contract smoke test on demo tickets | `python -m src.pipeline --check` |
 | One ticket from the CLI | `python -m src.pipeline --subject "VPN" --body "VPN drops every 10 min"` |
 | Clean-checkout test (what a judge sees) | `scripts/fresh_clone_test.sh [--light]` |
@@ -67,11 +68,12 @@ subject, body ─► triage (S2) ─► retrieve top-k from KB index (S3) ─►
 - `app.py` is a thin Streamlit layer: triage console, live queue and major-incident banner. All thresholds come from `src/config.py`.
 
 ## Major-incident detection
-`src/burst.py` keeps a rolling window of the last 20 tickets. Each new ticket is compared with the window, and if at least 3
+`src/burst.py` keeps a rolling window of recent tickets (10 with e5, 20 with the fallback). Each new ticket is compared with the window, and if at least 3
 (including the new one) are similar, the console shows one **MAJOR INCIDENT SUSPECTED** banner and escalates those
-tickets with the reason "Possible major incident". Similarity defaults to character 3–5-gram hashing vectors (no model,
-no fitting; same-outage reports in `src/examples.py` score 0.35–0.59 vs ≤ 0.19 for unrelated tickets, threshold 0.30).
-Pass `embed_fn` (e.g. S3's multilingual encoder) to match across languages. Burst state lives only in the console session;
+tickets with the reason "Possible major incident". When S3's index is built, similarity uses the same multilingual e5 encoder as retrieval (`embed_texts`, one model
+in memory), so English and German reports of one outage are grouped: threshold 0.91, window 10, tuned on the demo outage
+plus 300 random KB validation tickets (fires on the 3rd report; ~4% false alarms on real tickets). Without the index it falls
+back to character 3–5-gram hashing (threshold 0.30, window 20, same-language only). Burst state lives only in the console session;
 `run_ticket()` stays stateless, so `evaluate.py` is unaffected.
 
 ## Data rules (zero leakage)
@@ -188,8 +190,9 @@ _S1 fills in after `python evaluate.py`._
 
 ## Limitations
 - Only English and German are supported (the only languages in the dataset).
-- The default burst detector matches by surface text, so an English and a German report of the same outage are not grouped
-  unless a multilingual `embed_fn` is supplied. Burst state is per console session and is lost on restart.
+- Outage detection: the dataset's tickets are very repetitive, so with e5 about 4% of ordinary tickets still trigger a false
+  alarm (measured on 300 KB validation tickets). Without the index, the fallback only groups same-language reports.
+  Burst state is per console session and is lost on restart.
 - Demo stand-ins (`src/mocks.py`) are keyword heuristics for showing the flow only; their output is never reported as results.
 - PII masking is regex-based (emails, IPs, phone numbers). Names and addresses are not masked.
 - Escalation thresholds are tuned on the validation slice of one public dataset and may need retuning on real traffic.
