@@ -58,6 +58,39 @@ verbindung ausfall störung absturz langsam rechnung zahlung abrechnung rückers
 lizenz bestellung produkt kunde kunden sicherheit seite
 """.split())
 
+# Plus the 300 words found in the most KB tickets (training part only; each is in at least 702 of 34,948),
+# so terse but real tickets ("Encountering Periodic Performance Deterioration | Resolution Required",
+# "Fehlerhafte Platine-Problematik") count as readable. Keyboard mash and lorem ipsum still match nothing.
+KB_FREQUENT_WORDS = frozenset("""
+across additional additionally address advice affected affecting agency analysis analytics angelegenheit
+applications appreciate appreciated assist assistance attempted attempts attention aufgrund available back bald
+beheben behält believe benötigen bereits bereitstellen best bestehen besteht better boost brand breaches cache
+caches campaign campaigns capabilities cause caused causing changes checking clearing compatibility
+comprehensive concern concerns confidentiality configuration configurations conflicts connections connectivity
+contacting content continues critical current currently dank darauf dashboard datenanalyse decisions delays
+despite detailed detaillierte details detected devices dies difficulties digital digitale digitalen disruptions
+documentation due durch efforts encountered encountering encryption engagement enhance enhancing ensure erfahren
+erhalten experienced experiencing facing falls features festgestellt financial firewall forward freue freuen
+further future geben gerne gestartet grateful greatly growth guidance habe healthcare hearing helfen hospital
+hören immediate impacting improve incident include including inform information informationen informed initial
+inquire inquiry insbesondere insights integrating integrations integrity interessiert interested investment
+jedoch kindly know kundenservice kundensupport könnte könnten learning let logs look looking lösen lösung making
+management marketing matter maßnahmen measures media medical medizinische medizinischen medizinischer mehr
+melden methods multiple möglich mögliche möglicherweise name necessary needed neu occurred offer online
+optimierung optimization optimize optimizing options out outdated overload particularly patient patientendaten
+performance persist persists platform platforms plattform possible potential practices prevent process
+processing project projektmanagement prompt promptly protocols provide reaching recent recommendations records
+regarding related remains reporting require required resolution resolve resolved resolving resources response
+restart restarted restarting reviewed reviewing root rückmeldung saas schreibe schritte schätzen secure securing
+seek seeking sein sensitive settings several share sich significant situation social solution solutions soon
+specific specifically starten steps strategien strategies strategy such suspect systeme take taken team through
+time tool tools tried troubleshooting unauthorized unexpected unresolved unserer unterstützung updated updates
+updating urgently ursache various verbessern verbesserung versucht vielen weitere weiterhin well within writing
+wurde wurden wäre würde zeit zur zurückzuführen zusätzliche überprüft
+""".split())
+COMMON_WORDS = COMMON_WORDS | KB_FREQUENT_WORDS | frozenset(
+    "alle alles jetzt immer wieder mehr neu neue neuen leider doch dann gerade anweisungen".split())
+
 # --- Unsupported-action detection -------------------------------------------------------------
 # Each topic: (label, request pattern in the ticket, evidence pattern in retrieved answers).
 # If the ticket matches the request pattern and NO retrieved answer matches the evidence pattern,
@@ -69,21 +102,40 @@ UNSUPPORTED_TOPICS: list[tuple[str, re.Pattern, re.Pattern]] = [
                 r"r[üu]ckerstatt\w*|erstatt\w*|geld zur[üu]ck|entsch[äa]dig\w*|gutschrift\w*)", _F),
      re.compile(r"\b(refund\w*|reimburs\w*|compensat\w*|credit note|r[üu]ckerstatt\w*|erstatt\w*|"
                 r"entsch[äa]dig\w*|gutschrift\w*)", _F)),
+    # Narrowed on the KB (38,810 tickets): "stock prices", "preisgeben" (disclose), "angebotene Dienstleistungen"
+    # (offered services) and "quote the error" are not price requests.
     ("specific pricing or discount",
-     re.compile(r"\b(how much (does|will|would|is)|price\w*|pricing|quote|quotation|discount\w*|"
-                r"cost (of|for)|preis\w*|kosten f[üu]r|rabatt\w*|angebot\w*|(was|wie ?viel) kostet)", _F),
-     re.compile(r"(\b(price\w*|pricing|discount\w*|preis\w*|rabatt\w*)\b|[€$£]\s?\d|\d\s?(€|eur|usd)\b)", _F)),
+     re.compile(r"\b(how much (does|will|would|is|are)|(?<!stock )(?<!share )prices?\b|pricing|"
+                r"(a|an|your|price|pricing) quote\b|quote for\b|quotation|discount\w*|cost (of|for)|"
+                r"preis(?!geb)\w*|kosten f[üu]r|rabatt\w*|kostenvoranschlag\w*|preisangebot\w*|"
+                r"(ein|ihr|unser|kein|konkretes|schriftliches|unverbindliches|individuelles) angebot\b|"
+                r"angebot (f[üu]r|über|zu)\b|(was|wie ?viel) kostet)", _F),
+     re.compile(r"(\b((?<!stock )(?<!share )prices?|pricing|discount\w*|preis(?!geb)\w*|rabatt\w*)\b|"
+                r"[€$£]\s?\d|\d\s?(€|eur|usd)\b)", _F)),
+    # Asks for a commitment only. On the KB, "guarantee/garantieren/gewährleisten" almost always mean "ensure"
+    # ("to guarantee the secure management of...", "die Vertraulichkeit zu gewährleisten": 1,007 false hits),
+    # and "SLA dashboard" is a technical ticket. The evidence side is narrow too, so "ensure" wording in an
+    # answer never counts as a precedent for a guarantee.
     ("guarantee or SLA commitment",
-     re.compile(r"\b(guarantee\w*|warrant(y|ies)|sla\b|service level|uptime commitment|"
-                r"garantie\w*|garantier\w*|zusicher\w*|gew[äa]hrleist\w*)", _F),
-     re.compile(r"\b(guarantee\w*|warrant(y|ies)|sla\b|service level|garantie\w*|garantier\w*|"
-                r"gew[äa]hrleist\w*)", _F)),
+     re.compile(r"\b((can|could|will|would|do) you (\w+ )?guarantee|guarantee (me|us)\b|"
+                r"(a|any|written|full|uptime|money-back|100%?) guarantee|"
+                r"guaranteed (uptime|refund|response|resolution|availability|delivery)|warrant(y|ies)|"
+                r"sla (credit|breach|guarantee|commitment|compensation|penalt)\w*|"
+                r"service[- ]level (agreement|credit|guarantee|commitment)\w*|uptime (guarantee|commitment)\w*|"
+                r"(k[öo]nnen|k[öo]nnten|w[üu]rden) sie (uns |mir )?(\w+ )?garantieren|"
+                r"(eine|keine|schriftliche|verbindliche) garantie|garantie (auf|f[üu]r)|"
+                r"zusicher\w*|gew[äa]hrleistungs(anspruch|frist|fall)\w*)", _F),
+     re.compile(r"\b(sla\b|service[- ]level|uptime (guarantee|commitment)|warrant(y|ies)|garantie\b|"
+                r"garantiebedingungen|gew[äa]hrleistungs\w+|money-back|guarantee (policy|terms))", _F)),
 ]
 
+# Narrowed on the KB: all 16 old hits were false ("gerichtete Werbung" = targeted ads, "klagend" = complaining).
 LEGAL_PATTERN = re.compile(
-    r"\b(lawsuit|sue (you|your)|legal action|lawyer|attorney|court|liabilit\w*|litigation|"
-    r"breach of contract|small claims|"
-    r"anwalt|rechtsanwalt|klage\w*|verklagen|gericht\w*|rechtliche schritte|haftung\w*)\b", _F)
+    r"\b(lawsuit|sue (you|your|the company)|legal (action|steps|proceedings)|lawyer|attorney|"
+    r"(see you|take (this|you|it|the matter)|go) (in|to) court|court (case|order|action|proceedings)|"
+    r"litigation|breach of contract|small claims|(held|be) liable|liability for|"
+    r"anwalt\w*|rechtsanwalt\w*|verklagen|klage (einreichen|erheben)|rechtliche schritte|vor gericht|"
+    r"gerichtlich\w*|gerichtsverfahren\w*|haftung\w*)\b", _F)
 
 # Security incidents (S1/S2 request). Deliberately narrow: bare "encrypt" / "verschlüssel" do NOT match,
 # because encryption questions are routine. "breach of contract" is LEGAL's job and "SLA breach" is an
@@ -94,14 +146,20 @@ SECURITY_PATTERN = re.compile(
     r"datenleck\w*|datenpanne\w*|erpress\w*|l(?:ö|oe)segeld\w*|gehackt\w*|sicherheitsvorfall\w*|"
     r"(?:dateien|daten) (?:sind|wurden) (?:\w+ ){0,2}verschl(?:ü|ue)sselt)", _F)
 
+# Narrowed: the old "system prompt" matched "restore the system promptly" (both KB hits were false), and
+# "developer mode" / "act as a ..." / "you are now a ..." are normal phrases in IT tickets. Role-play now
+# only counts when it targets the assistant itself ("act as an unrestricted AI").
 INJECTION_PATTERN = re.compile(
-    r"(ignore (all |any )?(the )?(previous|prior|above|earlier) (instructions|prompts?|rules)|"
+    r"(ignore (all |any )?(the |your )?(previous|prior|above|earlier) (instructions|prompts?|rules)|"
     r"disregard (all |any )?(the )?(previous|prior|above|your) (instructions|rules)|"
     r"forget (all |your )?(previous )?instructions|"
-    r"(reveal|print|show|repeat) (me )?(your|the) (system )?prompt|system prompt|"
-    r"you are now (a|an|in)\b|act as (a|an) |developer mode|jailbreak|"
+    r"(reveal|print|show|repeat|tell me) (me )?your (system |initial |hidden )?(prompt|instructions)\b|"
+    r"\bsystem[- ]?prompt\b|"
+    r"(you are now|act as|pretend to be) (an? )?(unrestricted |uncensored |jailbroken )?"
+    r"(ai|assistant|chatbot|gpt|llm|language model|dan)\b|"
+    r"\bjailbreak\w*|\bdo anything now\b|"
     r"ignoriere (alle )?(vorherigen|bisherigen|obigen) (anweisungen|regeln)|"
-    r"vergiss (alle )?(vorherigen )?anweisungen|systemprompt|system-prompt)", _F)
+    r"vergiss (alle )?(vorherigen )?anweisungen|\bsystemprompt\b)", _F)
 
 
 # --- Individual rules (pure; each returns a (code, reason) or None) -----------------------------

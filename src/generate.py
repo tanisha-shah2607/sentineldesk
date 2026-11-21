@@ -76,7 +76,7 @@ def build_prompt(subject, body, lang: str, hits: list[dict]) -> str:
         f'<precedent id="{h["ticket_id"]}" similarity="{float(h.get("score") or 0):.2f}" '
         f'language="{h.get("language", "?")}">\n'
         f"Subject: {_clean(h.get('subject')) or '(none)'}\n"
-        f"Resolution: {_clean(h.get('answer'), _prompt_answer_chars())}\n</precedent>"
+        f"Resolution: {_clean(strip_placeholders(h.get('answer')), _prompt_answer_chars())}\n</precedent>"
         for h in hits)
     return (f"<precedents>\n{precedents}\n</precedents>\n\n"
             f"<ticket>\nSubject: {_clean(subject) or '(none)'}\nBody: {_clean(body, _ticket_chars())}\n</ticket>\n\n"
@@ -134,7 +134,7 @@ def _unsupported_claims(sentence: str, evidence: str, evidence_digits: set[str])
 
 def _strip_ids(text: str, bad: set[str]) -> str:
     for b in bad:
-        text = re.sub(rf"\s?\[?{re.escape(b)}\]?", "", text)
+        text = re.sub(rf"\s?\[?{re.escape(b)}(?!\d)\]?", "", text)  # (?!\d): removing TKT-1 must not hit TKT-12
     text = re.sub(r"\[\s*[,;]?\s*\]", "", text)          # emptied brackets
     text = re.sub(r"\[\s*[,;]\s*", "[", text)
     text = re.sub(r"\s*[,;]\s*\]", "]", text)
@@ -155,6 +155,7 @@ def validate_draft(text: str, hits: list[dict], lang: str) -> dict:
     """Pure post-check of an LLM draft against the retrieved evidence. Returns the draft_reply dict."""
     # some models (gpt-oss) write typographic hyphens; "TKT‑90002" must still count as a citation
     text = re.sub(r"TKT[‐-―−]", "TKT-", text)
+    text = strip_placeholders(text)  # e.g. "Best regards, [Your Name]" copied from a precedent
     valid = [h["ticket_id"] for h in hits]
     evidence = " ".join(f"{h.get('subject') or ''} {h.get('answer') or ''}" for h in hits)
     evidence_digits = {_digits(m.group(0)) for rx in (MONEY_RE, PERCENT_RE, DEADLINE_RE)
@@ -201,9 +202,68 @@ def validate_draft(text: str, hits: list[dict], lang: str) -> dict:
 
 
 # ----------------------------------------------------------------------------------------------
-# Template fallback (no LLM): quotes the top precedent verbatim, so it is grounded by construction
+# KB answers are agent replies full of fill-in placeholders. Counted on the KB: "<tel_num>" in 14,545 answers,
+# "<name>" 8,520, "[name]" 4,779, "<acc_num>" 3,841, plus "[your name]", "[telefonnummer]", "[support team name]",
+# "{name}" ... and HTML "<br>". They are removed before an answer is quoted or sent to the LLM, and from LLM output.
 # ----------------------------------------------------------------------------------------------
-_PLACEHOLDER = re.compile(r"\s*<[a-z_]{2,20}>")
+_PH_SQUARE = re.compile(
+    r"\[\s*(?:your|ihr|ihre|dein|deine|customer'?s?|kunden|support|company)?\s*"
+    r"(?:first |last |full )?(?:name|company(?: name)?|team(?: name)?|support(?: team)?(?: name)?|"
+    r"tel(?:[ _-]?(?:num|number|nummer))?|phone(?:[ _]number)?|telephone[ _]number|telefon(?:nummer)?|telnummer|"
+    r"acc(?:[ _]?(?:num|number))?|account[ _]number|konto(?:nummer|-nr\.?)?|e-?mail(?: address)?|"
+    r"date|datum|time|zeit|address|adresse|website|url|link|amount|betrag|position|title|signature|"
+    r"contact(?: information| details)?|customer(?:[ _]name)?|kunden(?:nummer|name)?|tel\.? ?-?nummer|"
+    r"konto-?nummer|recipient'?s? name|(?:support )?agent(?: name)?|tool[ _]name)\s*\]", _F)
+_PH_ANGLE = re.compile(r"<\s*(?!br\b)[a-z_\-]{2,25}\s*>", _F)
+_PH_CURLY = re.compile(r"\{\{?\s*\\?\"?[a-z_]{2,25}\s*\}?\}", _F)
+_BR = re.compile(r"<\s*br\s*/?\s*>", _F)
+_GREETING = re.compile(
+    r"^\s*(dear|hello|hi|hey|good (morning|afternoon|evening|day)|greetings|sehr geehrte[rs]?(/r)?|"
+    r"liebe[rs]?|hallo|guten tag|moin)\b[^,\n.!]{0,40}[,!.]?\s*", _F)
+_THANKS_LEAD = re.compile(r"^(thank you|thanks|vielen dank|danke)\b[^.!?\n]{0,140}[.!?]\s*", _F)
+_SIGNOFF = re.compile(
+    r"\s*((best|kind|warm|many|with)\s+)?regards\b(?! to).{0,80}$|\s*(sincerely|yours (truly|sincerely))\b.{0,80}$|"
+    r"\s*(mit\s+)?(freundlichen|besten|herzlichen|vielen)\s+gr(ü|ue)(ß|ss)en\b.{0,80}$|"
+    r"\s*(freundliche|beste|viele|liebe)\s+gr(ü|ue)(ß|ss)e\b.{0,80}$", _F | re.S)
+_GENERIC_ASK = re.compile(r"(provide|share|send|give)( us| me)? (more|further|additional|some)? ?(details|information|info)|"
+                          r"(mehr|weitere|genauere|zus[äa]tzliche) (details|informationen|angaben)", _F)
+
+
+def strip_placeholders(text) -> str:
+    s = _BR.sub("\n", str(text or ""))
+    # "call us at <tel_num> to discuss" -> "call us to discuss": drop the preposition with a phone placeholder
+    s = re.sub(r"[ \t]+(?:at|on|unter|via|an|per|under)[ \t]+(?=<\s*tel|\[\s*(?:tel|phone|telefon)|\{\s*tel)",
+               " ", s, flags=re.I)
+    s = _PH_ANGLE.sub("", _PH_CURLY.sub("", _PH_SQUARE.sub("", s)))
+    # dangling "at"/"unter" left before punctuation (not German "an": "rufen Sie uns an" needs it)
+    s = re.sub(r"\s+(?:at|unter|via|per)[ \t]*(?=[.,;!?])", "", s)
+    s = re.sub(r"[ \t]+([,.;:!?])", r"\1", s)   # "Dear , thanks" -> "Dear, thanks"
+    s = re.sub(r",([.;!?])", r"\1", s)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    return s.strip()
+
+
+def quotable_answer(text) -> str:
+    """A historical agent answer fit to quote to a customer: no placeholders, greeting, opening thanks or sign-off."""
+    s = strip_placeholders(text)
+    s = _GREETING.sub("", s, count=1)
+    s = re.sub(r"^[,.;:!\s]+", "", s)            # leftover of "<name>, thank you ..."
+    rest = _THANKS_LEAD.sub("", s, count=1)
+    if len(rest) > 60:                            # the template already thanks the customer
+        s = rest
+    s = _SIGNOFF.sub("", s).rstrip(" ,;\n")
+    return s[:1].upper() + s[1:]
+
+
+def _is_generic(answer: str) -> bool:
+    """Catch-all answers like TKT-07586 ("could you please provide more details about the issue?")."""
+    n = len(answer.split())
+    return n < 25 or (n < 45 and bool(_GENERIC_ASK.search(answer)))
+
+
+# ----------------------------------------------------------------------------------------------
+# Template fallback (no LLM): quotes the best precedent verbatim, so it is grounded by construction
+# ----------------------------------------------------------------------------------------------
 
 TEMPLATES = {
     "en": {
@@ -232,15 +292,16 @@ def template_fallback(lang: str, hits: list[dict], llm_error: str | None = None)
     if not hits:
         return {"text": t["none"], "cited_ids": [], "warnings": [], "used_fallback": True, "llm_error": llm_error,
                 "abstained": False}
-    top = hits[0]
-    answer = _PLACEHOLDER.sub("", str(top.get("answer") or "")).strip()
+    cleaned = [(h, quotable_answer(h.get("answer"))) for h in hits]
+    # quote the highest-scored precedent with real content; generic catch-all answers only if nothing else
+    top, answer = next(((h, a) for h, a in cleaned if not _is_generic(a)), cleaned[0])
     if len(answer) > MAX_ANSWER_CHARS:
         answer = answer[:MAX_ANSWER_CHARS].rsplit(" ", 1)[0] + " ..."
     parts = [t["intro"].format(id=top["ticket_id"])]
     if top.get("language") and top["language"] != lang:
         parts.append(t["foreign"])
     parts.append(f"\n\n{answer}\n")
-    others = [h["ticket_id"] for h in hits[1:3]]
+    others = [h["ticket_id"] for h, a in cleaned if h is not top and not _is_generic(a)][:2]
     if others:
         parts.append(t["also"].format(ids=", ".join(f"[{i}]" for i in others)))
     parts.append(t["close"])
@@ -266,4 +327,9 @@ def draft_reply(subject, body, lang: str, hits: list[dict]) -> dict:
         return template_fallback(lang, hits, str(e))
     except Exception as e:  # never let generation crash the pipeline
         return template_fallback(lang, hits, f"{type(e).__name__}: {e}")
-    return validate_draft(raw, hits, lang)
+    try:
+        return validate_draft(raw, hits, lang)
+    except Exception as e:  # a checker bug must neither crash the pipeline nor let an unchecked draft through
+        fb = template_fallback(lang, hits, f"validator error: {type(e).__name__}: {e}")
+        fb["warnings"] = ["The LLM draft could not be checked (validator error); the template was used instead"]
+        return fb
