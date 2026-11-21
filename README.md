@@ -229,7 +229,7 @@ Including the 922 val tickets that do have a copy in the index raises top-1 queu
 better retrieval, so we quote the lower number. Higher scores mean better precedents: top-1 queue match rises from 43% in
 the lowest tenth of scores to 98% in the highest.
 
-**`SIM_THRESHOLD`** (no real precedent → escalate; `config.py` has 0.85). Tuned with `scripts/tune_threshold.py`:
+**`SIM_THRESHOLD`** (no real precedent → escalate; `config.py` has 0.845). Tuned with `scripts/tune_threshold.py`:
 - Dataset tickets are long and uniform in style and score high (99% above 0.88). Short tickets typed live score lower
   (0.852-0.901 for 19 hand-typed routine tickets) and overlap with off-topic text (0.785-0.874 for 17 off-topic tickets).
   A threshold tuned on dataset tickets alone (~0.89) would escalate 15 of the 19 routine tickets.
@@ -238,8 +238,8 @@ the lowest tenth of scores to 98% in the highest.
 
 | Threshold | Val tickets escalated | Hand-typed routine escalated | Off-topic caught |
 |---|---|---|---|
-| **0.845** (recommended) | 0% | 0 / 19 | 14 / 17 |
-| 0.85 (current) | 0.07% | 0 / 19 | 14 / 17 |
+| **0.845** (current, recommended) | 0% | 0 / 19 | 14 / 17 |
+| 0.85 (previous) | 0.07% | 0 / 19 | 14 / 17 |
 | 0.875 | 0.7% | 9 / 19 | 17 / 17 |
 | 0.89 | 4.1% | 15 / 19 | 17 / 17 |
 
@@ -318,7 +318,7 @@ of any of top 5 is 0.99 either way. The dense (e5) retriever should beat the nev
 | `HIGH_INCIDENT` | predicted `priority == high` and `type == Incident` | the brief's mandatory rule |
 | `SECURITY_INCIDENT` | ransomware / ransom note, files encrypted by an attacker, data leak or breach, hacked or compromised systems (en + de: *Datenleck*, *Datenpanne*, *Lösegeld*, *gehackt*, *Sicherheitsvorfall*, *Dateien wurden verschlüsselt*) | the dataset rarely labels these urgent, so triage misses them. Narrow on purpose: bare "encrypt"/"verschlüssel" questions, "breach of contract" (`LEGAL`) and "SLA breach" don't match. On val: matches 6.7% of tickets (55% already escalated), +3.0 pts escalation, Incident+high escalated 0.912 → 0.922 |
 | `LOW_CONFIDENCE` | `overall_conf < CONF_THRESHOLD` | threshold in `config.py`, tuned on the `val` slice |
-| `NO_PRECEDENT` | no hits, or top similarity `< SIM_THRESHOLD` (0.85) | 0.85 comes from S3's `scripts/tune_threshold.py`: e5 scores sit in ~0.75-0.95, and 0.85 flags no hand-typed in-scope ticket while catching 12/17 off-topic ones |
+| `NO_PRECEDENT` | no hits, or top similarity `< SIM_THRESHOLD` (0.845) | 0.845 comes from S3's `scripts/tune_threshold.py` on the index without generic answers: e5 scores sit in ~0.75-0.95, and 0.845 flags no hand-typed routine ticket (0.85 left only 0.0016 margin) while catching 14/17 off-topic ones |
 | `UNSUPPORTED_ASK` | ticket asks for a refund/compensation, a price/discount, or a guarantee/SLA, and no retrieved answer covers that topic | en + de keyword patterns |
 | `LEGAL` | legal threat or legal commitment (lawsuit, lawyer, *Anwalt*, *Klage* ...) | always a human |
 | `PROMPT_INJECTION` | "ignore previous instructions", "system prompt", *"ignoriere alle vorherigen Anweisungen"* ... | |
