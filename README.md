@@ -52,7 +52,7 @@ Return shapes are documented at the top of each module; every stub already retur
   Use `unescape(answer)` before showing or prompting with an answer.
 - `retrieve` -> `[{ticket_id, score, subject, answer, snippet, queue, type, language}]`, sorted by score; `[]` for empty text.
   Optional `part="all"|"train"` and `xl_slots` (see Retrieval below).
-- `decide` -> `{escalate, reasons, codes}`; `draft_reply` -> `{text, cited_ids, warnings, used_fallback, llm_error}` (`codes` and `llm_error` are additive)
+- `decide` -> `{escalate, reasons, codes}`; `draft_reply` -> `{text, cited_ids, warnings, used_fallback, llm_error, abstained}` (`codes`, `llm_error` and `abstained` are additive)
 - `run_ticket` -> `{triage, hits, gate, draft(+for_review), latency}`; latency keys (ms): `triage_ms, retrieve_ms, gate_ms, generate_ms, total_ms`
 - Two-stage escalation: `decide()` runs before generation; any draft `warnings` afterwards also escalate. Escalated tickets still get a draft, labelled "for engineer review".
 - These shapes are enforced in code by `src/contracts.py` (used by `--check` and `tests/test_pipeline.py`).
@@ -317,7 +317,12 @@ of any of top 5 is 0.99 either way. The dense (e5) retriever should beat the nev
 | `EMPTY_TICKET` | body under 15 characters | |
 | `UNREADABLE` | no recognisable English/German word or IT term (keyboard mash, symbols, digits only) | similarity can't catch garbage: it scores like real short tickets |
 
-After generation, any draft `warning` also escalates the ticket (see `pipeline.py`).
+After generation, the draft can escalate the ticket too (see `pipeline.py`), with two different reasons:
+- **Hand-off** (`draft.abstained`, code `DRAFT_HANDOFF`): the LLM correctly declined because no retrieved precedent covers
+  the request (it cites nothing and hands off to a specialist). This is the safe outcome for fake refunds, injections,
+  legal threats or off-topic asks, and it is not counted as a grounding failure.
+- **Grounding failure** (`draft.warnings`, code `DRAFT_GROUNDING`): the validator removed an invalid citation or an
+  unsupported claim, the draft gives advice without citing a precedent, or it is in the wrong language.
 
 **Grounded generation** (`src/generate.py`, `src/llm.py`): hallucination control works in layers.
 1. **PII masking** (`src/pii.py`): emails, phone numbers, IPs, IBANs, Luhn-valid card numbers, labelled account numbers
@@ -337,8 +342,30 @@ LLM setup (`.env`, see `.env.example`). The default model is `claude-opus-5-5` a
 - `LLM_PROVIDER=vertex`: Claude on Google Cloud Vertex AI, paid with Google Cloud credits. There is no API key (a Gemini key does not work).
   Enable the Claude model in Vertex AI Model Garden, run `gcloud auth application-default login`, and set `ANTHROPIC_VERTEX_PROJECT_ID`.
   Refusals retry on `LLM_FALLBACK_MODEL` through the SDK's client-side middleware.
+- `LLM_PROVIDER=groq`: OpenAI's open-weight `gpt-oss-120b` on Groq's free tier (`GROQ_API_KEY` from console.groq.com).
+  The free tier allows 8K tokens/min and 200K tokens/day, so set `LLM_MAX_PRECEDENTS=3` and `LLM_MAX_ANSWER_CHARS=800`.
+  Reasoning is requested at `LLM_EFFORT=low` and excluded from the response; HTTP 429 waits up to `LLM_RATE_WAIT` seconds.
 - `LLM_PROVIDER=ollama`: a local model. With `LLM_PROVIDER=none` the app still works using template replies.
 Tests: `pytest tests/test_gate.py tests/test_pii.py tests/test_generate.py tests/test_llm.py` (offline; the LLM is faked).
+Live check (needs a working `.env`, no data/index/model): `python scripts/llm_smoke.py --models claude-opus-5-5 claude-haiku-5-5 --show`
+runs the 20 adversarial tickets through `draft_reply()` with the real model and reports safety-check failures and latency p50/p95 per model.
+
+## Why so many tickets escalate (deliberate: safety-first)
+`python scripts/tune_gate.py` maps the trade-off on the validation slice (never-seen tickets, triage-driven rules only, so rates
+are a lower bound; S2 re-measured it independently and got the same numbers: 55% / 88% vs our 54% / 87.5%).
+
+| priority bar | CONF_THRESHOLD (T1) | escalation rate | recall of true Incident+high | routine tickets auto-drafted | queue accuracy of auto-drafts |
+|---|---|---|---|---|---|
+| 0.30 | **0.50 (chosen)** | 54% | **87.5%** | 53% | 73% |
+| 0.30 | 0.40 | 42% | 81.6% | 67% | 66% |
+| 0.30 | 0.30 | 31% | 78.1% | 79% | 61% |
+| 0.50 | 0.50 | 50% | 80.0% | 56% | 72% |
+
+T1 is the main lever: each 0.1 step down costs about 6 points of recall and gains about 12 points of auto-drafted routine tickets.
+The priority bar barely matters (0.30 to 0.50 saves 4 points of escalations but loses 7.5 points of recall), so S2's recall-tuned
+bar stays. **The team chose safety-first (T1 = 0.50):** a human reading an extra ticket is cheaper than missing a real outage.
+Confidence is meaningful: queue accuracy of auto-drafted tickets rises with T1 (61% to 73%). Hand-typed tickets look unlike the
+dataset, so they score lower confidence and escalate more often than dataset tickets do.
 
 ## Results
 _S1 fills in after `python evaluate.py` with the real gate and retrieval._
