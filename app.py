@@ -11,7 +11,7 @@ body = st.text_area("Ticket body", height=160)
 
 if st.button("Triage", type="primary") and body.strip():
     r = run_ticket(subject, body)
-    tri, gate, lat = r["triage"], r["gate"], r["latency"]
+    tri, gate, lat, draft = r["triage"], r["gate"], r["latency"], r["draft"]
 
     if gate["escalate"]:
         st.error("ESCALATE TO ON-CALL ENGINEER: " + "; ".join(gate["reasons"]))
@@ -28,8 +28,10 @@ if st.button("Triage", type="primary") and body.strip():
 
     st.subheader("Retrieved precedents")
     st.dataframe([{"ticket_id": h["ticket_id"], "similarity": round(h["score"], 3),
-                   "answer": h["answer"][:200]} for h in r["hits"]], use_container_width=True)
+                   "answer": h["snippet"]} for h in r["hits"]], use_container_width=True)
 
-    st.subheader("Draft reply")
-    st.write(r["draft"]["text"])
-    st.caption("Cited: " + ", ".join(r["draft"]["cited_ids"]))
+    st.subheader("Draft reply (for engineer review)" if draft["for_review"] else "Draft reply")
+    st.write(draft["text"])
+    st.caption("Cited: " + ", ".join(draft["cited_ids"]) + (" | template fallback" if draft["used_fallback"] else ""))
+    for w in draft["warnings"]:
+        st.warning(w)
