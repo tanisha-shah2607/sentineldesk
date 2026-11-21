@@ -44,7 +44,8 @@ RULES = {
     r"load_test_inputs|TEST_INPUT_PATH|test_inputs": (
         {"evaluate.py", "src/data.py", "src/config.py", "scripts/leakage_audit.py"}, "WARN"),
     r"read_parquet|read_csv|load_dataset|read_json\(|open\(.*data/": (
-        {"src/data.py", "scripts/leakage_audit.py", "scripts/run_adversarial.py"}, "WARN"),
+        # src/retrieval.py only reads its own index/ cache (kb_meta.parquet), never data/
+        {"src/data.py", "src/retrieval.py", "scripts/leakage_audit.py", "scripts/run_adversarial.py"}, "WARN"),
 }
 
 

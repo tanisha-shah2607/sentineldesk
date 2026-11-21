@@ -125,6 +125,18 @@ C. Generation: `run_ticket` on a stated sample (`--n-gen`, default 50): citation
 **High-Priority Incident Recall** (headline): of holdout tickets whose true label is Incident + high, the fraction the system
 escalates to a human. We also report the classifier version: the fraction for which triage predicts both labels correctly.
 
+**Duplicates (important for honest numbers).** The three source CSVs overlap (the 20k file is another version of the big file),
+so the same ticket can appear on both sides of the split. 21.8% of all holdout bodies, and **27.5% of clean holdout tickets**,
+have an exact-body twin in the KB (`data.holdout_seen_ids()`), and twins share their type/queue/priority labels 99.6-99.8% of
+the time. Likewise 25.8% of val tickets have a twin in train. So every stage A/B metric is reported three ways by `evaluate.py`:
+`all_*` (the brief's headline), `never_seen_*` (holdout tickets with no twin in the KB; the fair estimate for genuinely new
+tickets), and Macro-F1 by **detected** language (`detected_en_*`, `detected_de_*`). The dataset's `language` column is wrong on
+~11% of tickets, so never group or filter by it. When presenting, lead with `never_seen_*` and show `all_*` next to it.
+
+`scripts/make_split.py` falls back to downloading the repo's CSV files over plain HTTPS if the `datasets` library fails
+(or force it with `SENTINEL_FORCE_CSV=1`); the pinned fingerprint check guarantees the same split either way.
+Windows machines where pyarrow's DLL is blocked need `fastparquet` (in requirements.txt).
+
 ## Checks to run before merging your module / before the demo
 - `python scripts/run_adversarial.py`: 20 tricky tickets in `eval/adversarial.json` (empty subject, prompt injection,
   fake refund/SLA/price/integration asks, legal threat, PII, unsafe advice, French, garbage, 400x-long body). Checks:
