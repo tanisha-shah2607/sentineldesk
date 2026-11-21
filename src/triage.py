@@ -6,10 +6,11 @@ triage(subject, body) -> {
   "conf": {"type": float, "queue": float, "priority": float},   # calibrated prob of the PREDICTED class
   "overall_conf": float
 }
-CONTRACT (proposed by S1, S2/S4 confirm):
-  - overall_conf = min(conf.type, conf.queue, conf.priority); the gate compares THIS to CONF_THRESHOLD.
-  - conf.priority is the calibrated probability BEFORE any recall-tuned decision threshold.
-    (A recall-tuned threshold changes the predicted label, not the confidence.)
+CONTRACT (decided by S2):
+  - overall_conf = min(conf.type, conf.queue); the gate compares THIS to CONF_THRESHOLD.
+    Priority is excluded (its confidence is low on most tickets); high+Incident still escalates via the gate.
+  - conf.priority = probability of the label actually output, AFTER the recall-tuned threshold
+    (a ticket flagged "high" at 0.35 shows 0.35).
   - Train only on load_kb_clean(part="train"); calibrate on part="val".
 triage_batch(items) -> [triage dict, ...]  for items = [(subject, body), ...]. Used by evaluate.py on the
   full holdout; vectorize it (the default below just loops).
