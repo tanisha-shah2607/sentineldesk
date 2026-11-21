@@ -31,7 +31,8 @@ from functools import lru_cache
 import numpy as np
 
 from .config import INDEX_DIR, TOP_K
-from .text import build_text
+from . import text as _text_mod
+from .text import build_text, unescape
 
 MODEL_NAME = os.getenv("EMBED_MODEL", "intfloat/multilingual-e5-base")
 QUERY_PREFIX, PASSAGE_PREFIX = "query: ", "passage: "   # required by e5 models
@@ -42,7 +43,7 @@ PARTS = ("all", "train")
 
 EMB_PATH = INDEX_DIR / "kb_emb.npy"          # float32 (n, d), L2-normalised, row-aligned with META_PATH
 META_PATH = INDEX_DIR / "kb_meta.parquet"    # ticket_id, subject, answer, queue, type, language
-MODEL_TXT = INDEX_DIR / "model.txt"          # model that produced EMB_PATH
+MODEL_TXT = INDEX_DIR / "model.txt"          # cache key (model + text-builder version) of EMB_PATH
 META_COLS = ["ticket_id", "subject", "answer", "queue", "type", "language"]
 
 
@@ -83,13 +84,29 @@ def embed_texts(texts: list[str], is_query: bool = True, show_progress: bool = F
                            show_progress_bar=show_progress).astype(np.float32)
 
 
-def _cache_model() -> str | None:
+@lru_cache(maxsize=1)
+def _cache_key() -> str:
+    """Model name + hash of src/text.py. Any change to build_text()/unescape() changes the key, so a
+    stale embedding cache is detected instead of silently mismatching query-time text."""
+    import hashlib
+    from pathlib import Path
+    src = Path(_text_mod.__file__).read_bytes()
+    return f"{MODEL_NAME}|text:{hashlib.sha256(src).hexdigest()[:12]}"
+
+
+def _stored_key() -> str | None:
     return MODEL_TXT.read_text().strip() if MODEL_TXT.exists() else None
 
 
 def index_ready() -> bool:
-    """True if the embedding cache for MODEL_NAME exists (the search index can then be built in seconds)."""
-    return EMB_PATH.exists() and META_PATH.exists() and _cache_model() == MODEL_NAME
+    """True if the embedding cache exists for this model AND this build_text() version
+    (the search index can then be built in seconds)."""
+    return EMB_PATH.exists() and META_PATH.exists() and _stored_key() == _cache_key()
+
+
+def _norm_body(body: "pd.Series") -> "pd.Series":  # noqa: F821
+    """Normalised body used to detect duplicate tickets (unescaped, whitespace-collapsed, lowercase)."""
+    return body.map(unescape).str.replace(r"\s+", " ", regex=True).str.strip().str.lower()
 
 
 def embed_kb(force: bool = False) -> None:
@@ -107,7 +124,7 @@ def embed_kb(force: bool = False) -> None:
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     np.save(EMB_PATH, emb)
     kb[META_COLS].reset_index(drop=True).to_parquet(META_PATH, index=False)
-    MODEL_TXT.write_text(MODEL_NAME + "\n")
+    MODEL_TXT.write_text(_cache_key() + "\n")
     print(f"Saved {emb.shape} -> {EMB_PATH}\nSaved metadata -> {META_PATH}")
 
 
@@ -115,7 +132,8 @@ def load_kb_embeddings() -> tuple[np.ndarray, "pd.DataFrame"]:  # noqa: F821
     """(embeddings, metadata) from the cache, row-aligned. For S3's index build and S2's classifier."""
     import pandas as pd
     if not index_ready():
-        raise FileNotFoundError(f"No embedding cache for {MODEL_NAME} in {INDEX_DIR}. "
+        raise FileNotFoundError(f"No up-to-date embedding cache in {INDEX_DIR} (missing, or the model or "
+                                "src/text.py changed). "
                                 "Run: python scripts/build_index.py")
     return np.load(EMB_PATH), pd.read_parquet(META_PATH)
 
@@ -140,7 +158,7 @@ def build_index(part: str = "all") -> dict:
     sel = meta["ticket_id"].isin(set(kb["ticket_id"])).to_numpy()
     emb, meta = emb[sel], meta[sel].reset_index(drop=True)
     body = meta[["ticket_id"]].merge(kb, on="ticket_id", how="left")["body"]
-    meta["_body"] = body.fillna("").str.replace(r"\s+", " ", regex=True).str.strip().str.lower().to_numpy()
+    meta["_body"] = _norm_body(body).to_numpy()
 
     keep = _dedupe_positions(meta)
     emb = np.ascontiguousarray(emb[keep])
@@ -162,7 +180,8 @@ def _load(part: str):
     import pandas as pd
     assert part in PARTS, part
     if not index_ready():
-        raise FileNotFoundError(f"No embedding cache for {MODEL_NAME} in {INDEX_DIR}. "
+        raise FileNotFoundError(f"No up-to-date embedding cache in {INDEX_DIR} (missing, or the model or "
+                                "src/text.py changed). "
                                 "Run: python scripts/build_index.py")
     if not (_vec_path(part).exists() and _meta_path(part).exists()):
         build_index(part)
@@ -170,6 +189,8 @@ def _load(part: str):
     meta = pd.read_parquet(_meta_path(part))
     for c in META_COLS:                       # contract: plain str, never NaN/None (8.7% null subjects)
         meta[c] = meta[c].fillna("").astype(str)
+    for c in ("subject", "answer"):           # literal "\n" escapes -> real line breaks (see text.unescape)
+        meta[c] = meta[c].map(unescape)
     meta["snippet"] = meta["answer"].str[:SNIPPET_CHARS]
     return vecs, meta[META_COLS + ["snippet"]].to_dict("records")
 

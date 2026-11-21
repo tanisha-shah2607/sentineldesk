@@ -81,9 +81,20 @@ def test_train_index_excludes_val():
 @needs_index
 def test_index_has_no_duplicate_bodies():
     from src.data import load_kb_clean
+    from src.retrieval import _norm_body
     kb = load_kb_clean(need_answer=True)
     ids = [r["ticket_id"] for r in _load("all")[1]]
-    body = kb.set_index("ticket_id").loc[ids, "body"]
-    norm = body.fillna("").str.replace(r"\s+", " ", regex=True).str.strip().str.lower()
+    norm = _norm_body(kb.set_index("ticket_id").loc[ids, "body"])
     assert len(ids) == len(set(ids)) and not norm.duplicated().any()
-    assert len(ids) == kb["body"].fillna("").str.replace(r"\s+", " ", regex=True).str.strip().str.lower().nunique()
+    assert len(ids) == _norm_body(kb["body"]).nunique()
+
+
+@needs_index
+def test_answers_have_no_literal_newline_escapes():
+    recs = _load("all")[1]
+    assert not any("\\n" in r["answer"] or "\\n" in r["snippet"] for r in recs)
+
+
+def test_cache_key_tracks_text_builder():
+    from src.retrieval import MODEL_NAME, _cache_key
+    assert _cache_key().startswith(MODEL_NAME + "|text:")
