@@ -345,6 +345,8 @@ LLM setup (`.env`, see `.env.example`). The default model is `claude-opus-5-5` a
 - `LLM_PROVIDER=groq`: OpenAI's open-weight `gpt-oss-120b` on Groq's free tier (`GROQ_API_KEY` from console.groq.com).
   The free tier allows 8K tokens/min and 200K tokens/day, so set `LLM_MAX_PRECEDENTS=3` and `LLM_MAX_ANSWER_CHARS=800`.
   Reasoning is requested at `LLM_EFFORT=low` and excluded from the response; HTTP 429 waits up to `LLM_RATE_WAIT` seconds.
+  Batch runs (`evaluate.py`, `run_adversarial.py`, which set `SENTINELDESK_STRICT=1`) wait up to `LLM_BATCH_RATE_WAIT`
+  (65 s) instead, so free-tier limits never turn into template fallbacks in the evaluation numbers.
 - `LLM_PROVIDER=ollama`: a local model. With `LLM_PROVIDER=none` the app still works using template replies.
 Tests: `pytest tests/test_gate.py tests/test_pii.py tests/test_generate.py tests/test_llm.py` (offline; the LLM is faked).
 Live check (needs a working `.env`, no data/index/model): `python scripts/llm_smoke.py --models claude-opus-5-5 claude-haiku-5-5 --show`

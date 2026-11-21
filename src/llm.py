@@ -11,6 +11,8 @@ llm_available() -> bool                    True if a provider is configured (no 
   groq:       GROQ_API_KEY (free key from console.groq.com). Free tier for gpt-oss-120b: 30 req/min, 1K req/day,
               8K tokens/min, 200K tokens/day. On HTTP 429 the call waits out `retry-after` if it is at most
               LLM_RATE_WAIT seconds (default 10), else it fails and the draft falls back to the template.
+              Batch runs (SENTINELDESK_STRICT=1, set by evaluate.py / run_adversarial.py) wait up to
+              LLM_BATCH_RATE_WAIT seconds (default 65) instead.
   anthropic:  ANTHROPIC_API_KEY
   vertex:     Claude on Google Cloud Vertex AI. No API key: sign in once with
               `gcloud auth application-default login`. ANTHROPIC_VERTEX_PROJECT_ID (else the gcloud
@@ -50,6 +52,16 @@ def _provider() -> str:
 
 def _timeout() -> float:
     return float(os.getenv("LLM_TIMEOUT", "30"))
+
+
+def _rate_wait_limit() -> float:
+    """Longest HTTP 429 wait before giving up. Live console: LLM_RATE_WAIT (default 10 s), so a judge never waits
+    long. Batch runs (evaluate.py and run_adversarial.py set SENTINELDESK_STRICT=1): at least LLM_BATCH_RATE_WAIT
+    (default 65 s), so a free-tier per-minute limit is waited out instead of silently becoming a template reply."""
+    live = float(os.getenv("LLM_RATE_WAIT", "10"))
+    if os.getenv("SENTINELDESK_STRICT", "").strip().lower() in ("1", "true", "yes", "on"):
+        return max(live, float(os.getenv("LLM_BATCH_RATE_WAIT", "65")))
+    return live
 
 
 def _model() -> str:
@@ -140,7 +152,7 @@ def _groq(prompt: str, system: str) -> str:
         "top_p": 0.95,
         "max_completion_tokens": int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1500")),
     }
-    max_wait = float(os.getenv("LLM_RATE_WAIT", "10"))
+    max_wait = _rate_wait_limit()
     for attempt in range(3):
         try:
             r = requests.post(GROQ_URL, json=body, timeout=_timeout(),
