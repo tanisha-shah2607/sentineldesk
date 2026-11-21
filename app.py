@@ -186,8 +186,11 @@ with tab_console:
             if draft["used_fallback"]:
                 cap += " · template fallback" + (f" ({draft['llm_error']})" if draft.get("llm_error") else "")
             st.caption(cap)
+            if draft.get("abstained"):
+                st.info("🤝 **Hand-off (correct refusal):** no retrieved precedent covers this request, so the assistant "
+                        "did not draft an answer and routed it to a specialist (`DRAFT_HANDOFF`).")
             for w in draft["warnings"]:
-                st.warning(w)
+                st.warning(f"Grounding problem (`DRAFT_GROUNDING`): {w}")
         with right:
             st.subheader("Confidence")
             for k in ("type", "queue", "priority"):

@@ -107,4 +107,6 @@ def validate_result(r) -> list[str]:
         p.append(f"latency: missing {missing}")
     if r["draft"].get("warnings") and not r["gate"].get("escalate"):
         p.append("draft has warnings but ticket was not escalated")
+    if r["draft"].get("abstained") and not r["gate"].get("escalate"):
+        p.append("draft abstained (hand-off) but ticket was not escalated")
     return p
