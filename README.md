@@ -52,7 +52,7 @@ Return shapes are documented at the top of each module; every stub already retur
   Use `unescape(answer)` before showing or prompting with an answer.
 - `retrieve` -> `[{ticket_id, score, subject, answer, snippet, queue, type, language}]`, sorted by score; `[]` for empty text.
   Optional `part="all"|"train"` and `xl_slots` (see Retrieval below).
-- `decide` -> `{escalate, reasons, codes}`; `draft_reply` -> `{text, cited_ids, warnings, used_fallback, llm_error}` (`codes` and `llm_error` are additive)
+- `decide` -> `{escalate, reasons, codes}`; `draft_reply` -> `{text, cited_ids, warnings, used_fallback, llm_error, abstained}` (`codes`, `llm_error` and `abstained` are additive)
 - `run_ticket` -> `{triage, hits, gate, draft(+for_review), latency}`; latency keys (ms): `triage_ms, retrieve_ms, gate_ms, generate_ms, total_ms`
 - Two-stage escalation: `decide()` runs before generation; any draft `warnings` afterwards also escalate. Escalated tickets still get a draft, labelled "for engineer review".
 - These shapes are enforced in code by `src/contracts.py` (used by `--check` and `tests/test_pipeline.py`).
@@ -316,7 +316,12 @@ of any of top 5 is 0.99 either way. The dense (e5) retriever should beat the nev
 | `EMPTY_TICKET` | body under 15 characters | |
 | `UNREADABLE` | no recognisable English/German word or IT term (keyboard mash, symbols, digits only) | similarity can't catch garbage: it scores like real short tickets |
 
-After generation, any draft `warning` also escalates the ticket (see `pipeline.py`).
+After generation, the draft can escalate the ticket too (see `pipeline.py`), with two different reasons:
+- **Hand-off** (`draft.abstained`, code `DRAFT_HANDOFF`): the LLM correctly declined because no retrieved precedent covers
+  the request (it cites nothing and hands off to a specialist). This is the safe outcome for fake refunds, injections,
+  legal threats or off-topic asks, and it is not counted as a grounding failure.
+- **Grounding failure** (`draft.warnings`, code `DRAFT_GROUNDING`): the validator removed an invalid citation or an
+  unsupported claim, the draft gives advice without citing a precedent, or it is in the wrong language.
 
 **Grounded generation** (`src/generate.py`, `src/llm.py`): hallucination control works in layers.
 1. **PII masking** (`src/pii.py`): emails, phone numbers, IPs, IBANs, Luhn-valid card numbers, labelled account numbers
@@ -336,8 +341,13 @@ LLM setup (`.env`, see `.env.example`). The default model is `claude-opus-5-5` a
 - `LLM_PROVIDER=vertex`: Claude on Google Cloud Vertex AI, paid with Google Cloud credits. There is no API key (a Gemini key does not work).
   Enable the Claude model in Vertex AI Model Garden, run `gcloud auth application-default login`, and set `ANTHROPIC_VERTEX_PROJECT_ID`.
   Refusals retry on `LLM_FALLBACK_MODEL` through the SDK's client-side middleware.
+- `LLM_PROVIDER=groq`: OpenAI's open-weight `gpt-oss-120b` on Groq's free tier (`GROQ_API_KEY` from console.groq.com).
+  The free tier allows 8K tokens/min and 200K tokens/day, so set `LLM_MAX_PRECEDENTS=3` and `LLM_MAX_ANSWER_CHARS=800`.
+  Reasoning is requested at `LLM_EFFORT=low` and excluded from the response; HTTP 429 waits up to `LLM_RATE_WAIT` seconds.
 - `LLM_PROVIDER=ollama`: a local model. With `LLM_PROVIDER=none` the app still works using template replies.
 Tests: `pytest tests/test_gate.py tests/test_pii.py tests/test_generate.py tests/test_llm.py` (offline; the LLM is faked).
+Live check (needs a working `.env`, no data/index/model): `python scripts/llm_smoke.py --models claude-opus-5-5 claude-haiku-5-5 --show`
+runs the 20 adversarial tickets through `draft_reply()` with the real model and reports safety-check failures and latency p50/p95 per model.
 
 ## Results
 _S1 fills in after `python evaluate.py` with the real gate and retrieval._

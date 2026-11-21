@@ -3,7 +3,8 @@
 run_ticket(subject, body) -> {triage, hits, gate, draft(+for_review), latency}
 Latency keys (ms): triage_ms, retrieve_ms, gate_ms, generate_ms, total_ms  (config.LATENCY_KEYS)
 Two-stage escalation: decide() runs before generation; after generation, any draft warning
-(invalid citation / stripped unsupported claim) also escalates the ticket.
+(invalid citation / stripped unsupported claim) also escalates the ticket, and so does a hand-off
+(draft["abstained"]: the LLM correctly declined because no precedent covers the request), with its own reason.
 
 Resilience (so the console works before every stage is finished):
   - A stage that raises NotImplementedError is replaced by its mock from src/mocks.py.
@@ -130,11 +131,17 @@ def run_ticket_verbose(subject, body, strict: bool | None = None) -> tuple[dict,
     draft = _call("generate", (s_llm, b_llm, tri["language"], hits), status, strict)
     lat["generate_ms"] = _ms(t)
 
+    extra, extra_codes = [], []
+    if draft.get("abstained"):
+        extra.append("Draft hands off to a specialist: no retrieved precedent covers this request")
+        extra_codes.append("DRAFT_HANDOFF")
     if draft.get("warnings"):
-        gate = {**gate, "escalate": True,   # keep S4's extra keys (e.g. "codes")
-                "reasons": gate["reasons"] + ["Draft failed grounding check: " + "; ".join(draft["warnings"])]}
+        extra.append("Draft failed grounding check: " + "; ".join(draft["warnings"]))
+        extra_codes.append("DRAFT_GROUNDING")
+    if extra:
+        gate = {**gate, "escalate": True, "reasons": gate["reasons"] + extra}  # keep S4's extra keys (e.g. "codes")
         if "codes" in gate:
-            gate["codes"] = list(gate["codes"]) + ["DRAFT_GROUNDING"]
+            gate["codes"] = list(gate["codes"]) + extra_codes
     draft = {**draft, "for_review": gate["escalate"]}
 
     lat["total_ms"] = _ms(t0)

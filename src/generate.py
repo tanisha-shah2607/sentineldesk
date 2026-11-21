@@ -5,9 +5,11 @@ draft_reply(subject, body, lang, hits) -> {
   "warnings": [str],        # grounding problems found by the validator (invalid citation, stripped claim...)
   "used_fallback": bool,    # True if the template fallback was used instead of the LLM
   "llm_error": str | None,  # why the LLM was skipped or failed (additive key, for the UI/debugging)
+  "abstained": bool,        # additive: the LLM correctly declined (cites nothing, hands off to a specialist)
 }
 Must: use only retrieved answers, cite [TKT-xxxxx], reply in `lang`, never invent policies/prices/guarantees.
-pipeline.py escalates the ticket if `warnings` is non-empty (post-generation check).
+pipeline.py escalates the ticket if `warnings` is non-empty (grounding failure) or `abstained` is True (hand-off:
+no precedent covers the request). The two get different reasons, so a correct refusal is not reported as a failure.
 Escalated tickets still get a draft; the UI labels it "for engineer review".
 
 Hallucination control, in order:
@@ -21,6 +23,7 @@ Hallucination control, in order:
 """
 from __future__ import annotations
 
+import os
 import re
 
 from .llm import LLMError, llm_available, llm_complete
@@ -28,6 +31,22 @@ from .pii import mask_pii
 
 MAX_ANSWER_CHARS = 1500
 LANG_NAME = {"en": "English", "de": "German"}
+
+
+def _prompt_answer_chars() -> int:
+    """Per-precedent answer length sent to the LLM (.env LLM_MAX_ANSWER_CHARS; lower it on rate-limited free tiers)."""
+    return int(os.getenv("LLM_MAX_ANSWER_CHARS") or MAX_ANSWER_CHARS)
+
+
+def _max_precedents() -> int:
+    """How many retrieved precedents the draft uses (.env LLM_MAX_PRECEDENTS, default 5)."""
+    return max(1, int(os.getenv("LLM_MAX_PRECEDENTS") or 5))
+
+
+def _ticket_chars() -> int:
+    """Ticket body length sent to the LLM (.env LLM_MAX_TICKET_CHARS, default 4000). Triage and the gate still
+    see the full text; this only stops one huge ticket from blowing the prompt size and per-minute token limits."""
+    return int(os.getenv("LLM_MAX_TICKET_CHARS") or 4000)
 
 SYSTEM_PROMPT = """You draft replies for an enterprise IT support desk. A human agent reviews every draft before it is sent.
 
@@ -57,10 +76,10 @@ def build_prompt(subject, body, lang: str, hits: list[dict]) -> str:
         f'<precedent id="{h["ticket_id"]}" similarity="{float(h.get("score") or 0):.2f}" '
         f'language="{h.get("language", "?")}">\n'
         f"Subject: {_clean(h.get('subject')) or '(none)'}\n"
-        f"Resolution: {_clean(h.get('answer'), MAX_ANSWER_CHARS)}\n</precedent>"
+        f"Resolution: {_clean(h.get('answer'), _prompt_answer_chars())}\n</precedent>"
         for h in hits)
     return (f"<precedents>\n{precedents}\n</precedents>\n\n"
-            f"<ticket>\nSubject: {_clean(subject) or '(none)'}\nBody: {_clean(body)}\n</ticket>\n\n"
+            f"<ticket>\nSubject: {_clean(subject) or '(none)'}\nBody: {_clean(body, _ticket_chars())}\n</ticket>\n\n"
             f"Write the reply to this ticket in {LANG_NAME.get(lang, 'English')}, citing precedent ids inline.")
 
 
@@ -87,6 +106,13 @@ NEGATION_RE = re.compile(
     r"\b(not|cannot|can't|unable|never|unfortunately|no (refund|guarantee|sla|discount|compensation)|"
     r"nicht|kein\w*|leider|niemals)\b", _F)
 SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+# A draft that cites nothing is a correct refusal (prompt rule 3) when it is short and hands off to a human;
+# a draft that cites nothing but gives advice is ungrounded. Both escalate, with different reasons.
+HANDOFF_RE = re.compile(
+    r"(specialist|colleague|cannot confirm|can't confirm|can not confirm|unable to|not able to|we cannot|i cannot|"
+    r"will follow up|get back to you|spezialist|kolleg|meldet sich|melden sich|leider nicht|nicht bestätigen|"
+    r"nicht bearbeiten|nicht zusagen|weiterleiten|weitergeleitet)", _F)
+MAX_HANDOFF_CHARS = 600
 
 
 def _digits(s: str) -> str:
@@ -127,6 +153,8 @@ def _detect_lang(text: str) -> str | None:
 
 def validate_draft(text: str, hits: list[dict], lang: str) -> dict:
     """Pure post-check of an LLM draft against the retrieved evidence. Returns the draft_reply dict."""
+    # some models (gpt-oss) write typographic hyphens; "TKT‑90002" must still count as a citation
+    text = re.sub(r"TKT[‐-―−]", "TKT-", text)
     valid = [h["ticket_id"] for h in hits]
     evidence = " ".join(f"{h.get('subject') or ''} {h.get('answer') or ''}" for h in hits)
     evidence_digits = {_digits(m.group(0)) for rx in (MONEY_RE, PERCENT_RE, DEADLINE_RE)
@@ -151,10 +179,14 @@ def validate_draft(text: str, hits: list[dict], lang: str) -> dict:
     text = re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
 
     cited = list(dict.fromkeys(i for i in ID_RE.findall(text) if i in valid))
-    if not cited:
-        warnings.append("Draft cites no retrieved precedent")
-
     plain = ID_RE.sub("", text)
+    abstained = False
+    if not cited:
+        if HANDOFF_RE.search(plain) and len(plain.strip()) <= MAX_HANDOFF_CHARS:
+            abstained = True  # correct refusal: no retrieved precedent covers the request
+        else:
+            warnings.append("Draft cites no retrieved precedent")
+
     if len(plain) > 60:
         got = _detect_lang(plain)
         if got and got != lang:
@@ -164,7 +196,8 @@ def validate_draft(text: str, hits: list[dict], lang: str) -> dict:
         fb = template_fallback(lang, hits)
         fb["warnings"] = warnings + ["LLM draft was empty after validation; used template"]
         return fb
-    return {"text": text, "cited_ids": cited, "warnings": warnings, "used_fallback": False, "llm_error": None}
+    return {"text": text, "cited_ids": cited, "warnings": warnings, "used_fallback": False, "llm_error": None,
+            "abstained": abstained}
 
 
 # ----------------------------------------------------------------------------------------------
@@ -197,7 +230,8 @@ TEMPLATES = {
 def template_fallback(lang: str, hits: list[dict], llm_error: str | None = None) -> dict:
     t = TEMPLATES["de" if lang == "de" else "en"]
     if not hits:
-        return {"text": t["none"], "cited_ids": [], "warnings": [], "used_fallback": True, "llm_error": llm_error}
+        return {"text": t["none"], "cited_ids": [], "warnings": [], "used_fallback": True, "llm_error": llm_error,
+                "abstained": False}
     top = hits[0]
     answer = _PLACEHOLDER.sub("", str(top.get("answer") or "")).strip()
     if len(answer) > MAX_ANSWER_CHARS:
@@ -212,7 +246,7 @@ def template_fallback(lang: str, hits: list[dict], llm_error: str | None = None)
     parts.append(t["close"])
     text = " ".join(parts).replace(" \n", "\n").replace("\n ", "\n")
     return {"text": text, "cited_ids": [top["ticket_id"], *others], "warnings": [], "used_fallback": True,
-            "llm_error": llm_error}
+            "llm_error": llm_error, "abstained": False}
 
 
 # ----------------------------------------------------------------------------------------------
@@ -221,7 +255,7 @@ def template_fallback(lang: str, hits: list[dict], llm_error: str | None = None)
 
 def draft_reply(subject, body, lang: str, hits: list[dict]) -> dict:
     lang = "de" if lang == "de" else "en"
-    hits = [h for h in (hits or []) if h.get("ticket_id")]
+    hits = [h for h in (hits or []) if h.get("ticket_id")][:_max_precedents()]
     if not hits:
         return template_fallback(lang, [], "no precedents retrieved")
     if not llm_available():
