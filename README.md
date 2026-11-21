@@ -34,7 +34,7 @@ Return shapes are documented at the top of each module; every stub already retur
   Use `unescape(answer)` before showing or prompting with an answer.
 - `retrieve` -> `[{ticket_id, score, subject, answer, snippet, queue, type, language}]`, sorted by score; `[]` for empty text.
   Optional `part="all"|"train"` and `xl_slots` (see Retrieval below).
-- `decide` -> `{escalate, reasons}`; `draft_reply` -> `{text, cited_ids, warnings, used_fallback}`
+- `decide` -> `{escalate, reasons, codes}`; `draft_reply` -> `{text, cited_ids, warnings, used_fallback, llm_error}` (`codes` and `llm_error` are additive)
 - `run_ticket` -> `{triage, hits, gate, draft(+for_review), latency}`; latency keys (ms): `triage_ms, retrieve_ms, gate_ms, generate_ms, total_ms`
 - Two-stage escalation: `decide()` runs before generation; any draft `warnings` afterwards also escalate. Escalated tickets still get a draft, labelled "for engineer review".
 
@@ -245,5 +245,62 @@ Windows machines where pyarrow's DLL is blocked need `fastparquet` (in requireme
 - `python scripts/leakage_audit.py`: disk (no holdout answers), static scan (who touches holdout files/loaders),
   models/ and index/ contain no holdout ticket ids, retrieval returns only KB ids. Exits 1 on any FAIL.
 
+## Baseline floors (`python scripts/baselines.py`, trained on clean KB, scored on the 9,768-ticket clean holdout)
+Macro-F1 (type / queue / priority) and High-Priority Incident recall from the classifier alone:
+
+| model | all | never-seen (7,083) |
+|---|---|---|
+| majority class | 0.142 / 0.045 / 0.192, recall 0.000 | 0.142 / 0.044 / 0.193, recall 0.000 |
+| plain TF-IDF + linear SVM | 0.897 / 0.673 / 0.714, recall 0.789 | 0.859 / 0.565 / 0.619, recall 0.721 |
+| S2 calibrated model (`triage()`) | 0.892 / 0.672 / 0.703, recall 0.830 | 0.857 / 0.562 / 0.606, recall 0.775 |
+
+Read this honestly: the dataset's labels cap accuracy (queue tops out near 0.67), and a plain SVM matches `triage()` on Macro-F1.
+What `triage()` adds is calibrated confidence for the gate, the outage rule, and higher high-priority-incident recall (+4 to +5 points).
+TF-IDF keyword retrieval (queue match of the top hit / any of top 5): all 0.802 / 0.909, never-seen **0.729 / 0.875**; type match
+of any of top 5 is 0.99 either way. The dense (e5) retriever should beat the never-seen numbers, especially cross-lingually.
+
+## Gate and generation (S4)
+**Escalation gate** (`src/gate.py`): deterministic rules, each a pure function. Any rule that fires sends the ticket to
+"Escalate to On-Call Engineer". `decide()` returns `{escalate, reasons, codes}`, where `codes` are rule ids that evaluate.py can count.
+
+| Code | Fires when | Notes |
+|---|---|---|
+| `HIGH_INCIDENT` | predicted `priority == high` and `type == Incident` | the brief's mandatory rule |
+| `LOW_CONFIDENCE` | `overall_conf < CONF_THRESHOLD` | threshold in `config.py`, tuned on the `val` slice |
+| `NO_PRECEDENT` | no hits, or top similarity `< SIM_THRESHOLD` (0.85) | 0.85 comes from S3's `scripts/tune_threshold.py`: e5 scores sit in ~0.75-0.95, and 0.85 flags no hand-typed in-scope ticket while catching 12/17 off-topic ones |
+| `UNSUPPORTED_ASK` | ticket asks for a refund/compensation, a price/discount, or a guarantee/SLA, and no retrieved answer covers that topic | en + de keyword patterns |
+| `LEGAL` | legal threat or legal commitment (lawsuit, lawyer, *Anwalt*, *Klage* ...) | always a human |
+| `PROMPT_INJECTION` | "ignore previous instructions", "system prompt", *"ignoriere alle vorherigen Anweisungen"* ... | |
+| `EMPTY_TICKET` | body under 15 characters | |
+| `UNREADABLE` | no recognisable English/German word or IT term (keyboard mash, symbols, digits only) | similarity can't catch garbage: it scores like real short tickets |
+
+After generation, any draft `warning` also escalates the ticket (see `pipeline.py`).
+
+**Grounded generation** (`src/generate.py`, `src/llm.py`): hallucination control works in layers.
+1. **PII masking** (`src/pii.py`): emails, phone numbers, IPs, IBANs, Luhn-valid card numbers, labelled account numbers
+   and URL credentials are masked in the ticket *and* the precedents before anything is sent to the LLM.
+2. **Prompt**: the model sees only the top-k retrieved precedents. The ticket is framed as untrusted customer text, and
+   its `<`/`>` are escaped so it cannot close the frame. The model must cite `[TKT-xxxxx]` inline, reply in the
+   detected language (translating cross-lingual precedents), and say "cannot confirm" for anything outside the evidence.
+3. **Output validator** (`validate_draft`): strips citations not in the retrieved set; strips sentences with money amounts,
+   percentages, deadlines ("within 4 hours"), or refund/guarantee/SLA/credit/discount/free-of-charge claims that the
+   evidence does not support (refusal sentences such as "we cannot confirm a refund" are kept); flags a draft with no
+   citation or in the wrong language. Every fix adds a `warning`, so the ticket escalates.
+4. **Template fallback**: if the LLM is not configured, fails, times out or refuses, the reply quotes the top precedent
+   verbatim in a localized template. That reply is grounded by construction (`used_fallback: true`, `llm_error` says why).
+
+LLM setup (`.env`, see `.env.example`). The default model is `claude-opus-5-5` at `LLM_EFFORT=low`; set `LLM_MODEL=claude-haiku-5-5` for lower latency.
+- `LLM_PROVIDER=anthropic`: direct Claude API with `ANTHROPIC_API_KEY`, plus the server-side refusal fallback.
+- `LLM_PROVIDER=vertex`: Claude on Google Cloud Vertex AI, paid with Google Cloud credits. There is no API key (a Gemini key does not work).
+  Enable the Claude model in Vertex AI Model Garden, run `gcloud auth application-default login`, and set `ANTHROPIC_VERTEX_PROJECT_ID`.
+  Refusals retry on `LLM_FALLBACK_MODEL` through the SDK's client-side middleware.
+- `LLM_PROVIDER=ollama`: a local model. With `LLM_PROVIDER=none` the app still works using template replies.
+Tests: `pytest tests/test_gate.py tests/test_pii.py tests/test_generate.py tests/test_llm.py` (offline; the LLM is faked).
+
 ## Results
-_S1 fills in after `python evaluate.py`._
+_S1 fills in after `python evaluate.py` with the real gate and retrieval._
+
+## Data credit and license
+Dataset: [Tobi-Bueck/customer-support-tickets](https://huggingface.co/datasets/Tobi-Bueck/customer-support-tickets) on Hugging Face,
+licensed CC BY-NC 4.0 (attribution, non-commercial). SentinelDesk is a hackathon project and is not for commercial use. The data
+is not redistributed in this repository (`data/` is gitignored).
