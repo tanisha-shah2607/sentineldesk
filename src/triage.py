@@ -12,33 +12,22 @@ CONTRACT (decided by S2):
   - conf.priority = probability of the label actually output, AFTER the recall-tuned threshold
     (a ticket flagged "high" at 0.35 shows 0.35).
   - Train only on load_kb_clean(part="train"); calibrate on part="val".
-  - Outage rule: clear outage wording ("VPN down", "outage", "ausgefallen", "nicht erreichbar", ...)
-    makes the ticket Incident + high, so the gate's high+Incident rule escalates it. The extra key
-    "outage_terms" lists the wording found (empty list if none), for the UI's escalation reason.
 triage_batch(items) -> [triage dict, ...]  for items = [(subject, body), ...]. Used by evaluate.py on the
-  full holdout; one vectorizer pass for the whole batch.
-
-The model is models/triage.joblib, built by `python scripts/train_triage.py`. Without it,
-triage() still answers (placeholder labels, with a warning) so contract tests run anywhere.
+  full holdout; vectorize it (the default below just loops).
 """
 from __future__ import annotations
 
 import os
 import re
-import warnings
 from functools import lru_cache
 
-from .config import MODEL_DIR
-from .text import build_text, unescape
+from .text import unescape
 
-MODEL_PATH = MODEL_DIR / "triage.joblib"
 SUPPORTED_LANGUAGES = ("en", "de")
 DEFAULT_LANGUAGE = "en"     # used only when the text has no letters to go on
 _LANG_SEED = 0              # plain langdetect is random; a fixed seed makes it repeatable
 _LANG_MAX_CHARS = 1000      # the language is clear long before 1,000 characters
 _HAS_LETTER = re.compile(r"[^\W\d_]")
-_PLACEHOLDER = {"type": "Incident", "queue": "Technical Support", "priority": "medium",
-                "conf": {"type": 0.5, "queue": 0.5, "priority": 0.5}, "overall_conf": 0.5}
 
 
 @lru_cache(maxsize=1)
@@ -91,42 +80,15 @@ def detect_language(text) -> str:
     return detect_language_with_prob(text)[0]
 
 
-@lru_cache(maxsize=1)
-def _load_model():
-    """The trained model, loaded once per process. None if it hasn't been trained here."""
-    if not MODEL_PATH.exists():
-        warnings.warn(f"{MODEL_PATH} not found, so triage() returns placeholder labels. "
-                      "Run: python scripts/train_triage.py", stacklevel=2)
-        return None
-    import joblib
-
-    return joblib.load(MODEL_PATH)
-
-
-def model_info() -> dict | None:
-    """When the model was trained and on what (for the UI or README); None without a model."""
-    model = _load_model()
-    return None if model is None else dict(model["meta"], priority_threshold=model["priority_threshold"])
+def triage(subject, body) -> dict:
+    # STUB labels: S2 replaces these with real models loaded from MODEL_DIR
+    return {
+        "language": detect_language(language_text(subject, body)),
+        "type": "Incident", "queue": "Technical Support", "priority": "medium",
+        "conf": {"type": 0.5, "queue": 0.5, "priority": 0.5},
+        "overall_conf": 0.5,
+    }
 
 
 def triage_batch(items) -> list[dict]:
-    items = list(items)
-    if not items:
-        return []
-    languages = [detect_language(language_text(s, b)) for s, b in items]
-    model = _load_model()
-    texts = [build_text(s, b) for s, b in items]
-    if model is None:
-        from .triage_model import outage_terms
-
-        labels = [dict(_PLACEHOLDER, conf=dict(_PLACEHOLDER["conf"]), outage_terms=outage_terms(t))
-                  for t in texts]
-    else:
-        from .triage_model import predict
-
-        labels = predict(model, texts)
-    return [{"language": lang, **lab} for lang, lab in zip(languages, labels)]
-
-
-def triage(subject, body) -> dict:
-    return triage_batch([(subject, body)])[0]
+    return [triage(s, b) for s, b in items]
