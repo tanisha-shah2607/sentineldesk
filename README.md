@@ -182,9 +182,16 @@ e5 needs the `query: ` / `passage: ` prefixes, which `embed_texts()` adds.
 
 **What is indexed (leakage-safe).** Only `load_kb_clean(need_answer=True)`: 38,810 KB tickets with an answer, embedded as
 `build_text(subject, body)`. Nothing from the holdout is read (`leakage_audit.py` check 4 confirms every returned id is a KB id).
-- Duplicates: 5,384 tickets repeat another ticket's body word for word. Each body is kept once (lowest `ticket_id`), so the
-  5 hits are 5 different precedents. Final index: **33,426** tickets.
-- Two indexes from one embedding cache: `part="all"` (33,426) for the app and evaluation, and `part="train"` (30,607) for
+- Generic answers removed: 2,713 tickets (7.0%) have an "answer" with no resolution in it: "call", "Sorry", "send guide",
+  "To better assist you, could you please provide more details…" (TKT-07586), "I will … call you back at <tel_num> shortly"
+  (TKT-33547). Their vague text sits close to many vague queries, so they kept coming up: on the same 2,869 val queries,
+  6.4% of top-1 hits and 22.1% of top-5 lists contained one, and the template reply quoted nothing useful (TKT-07586 was the
+  top hit for an English password reset). Rule (`is_generic_answer`): under 80 characters, or under 150 characters and only
+  asking for details / promising a call. Now 0% of top-1 and top-5 hits. Cost on the same queries: top-1 queue match
+  68.4% → 66.4%, queue in top 5 85.6% → 84.7% (those tickets carried matching queue *labels* but no usable content).
+- Duplicates: each body is kept once (lowest `ticket_id`, after removing generic answers, so a copy with a real answer wins),
+  so the 5 hits are 5 different precedents: 5,015 more dropped. Final index: **31,082** tickets.
+- Two indexes from one embedding cache: `part="all"` (31,082) for the app and evaluation, and `part="train"` (28,449) for
   tuning on the validation slice, so a val ticket can never retrieve itself.
 - Cache key = model name + hash of `src/text.py`. If `build_text()` changes, the cache is detected as stale and rebuilt
   instead of silently mismatching query-time text. So after any edit to `src/text.py`, run `python scripts/build_index.py`
@@ -194,49 +201,50 @@ e5 needs the `query: ` / `passage: ` prefixes, which `embed_texts()` adds.
 
 **Search: exact cosine similarity in NumPy, not FAISS.** Vectors are L2-normalised, so a dot product is the cosine;
 this gives exactly the results of `faiss.IndexFlatIP`. FAISS was dropped because on macOS its wheel and PyTorch's wheel each
-bundle `libomp`, and the process aborts (`OMP: Error #15`) once both are loaded. At ~33k vectors exact search costs a few ms.
+bundle `libomp`, and the process aborts (`OMP: Error #15`) once both are loaded. At ~31k vectors exact search costs a few ms.
 
 **Cross-lingual precedents (bonus).** e5 gives same-language tickets a small score bonus (~0.02-0.03), and because its scores
 sit in a narrow band, that bonus decides the ranking: the same ticket written in English and German shared on average 0.1
-of its 5 hits, even though the two query vectors are very close (cosine 0.93), and only 19% of German tickets got any
+of its 5 hits, even though the two query vectors are very close (cosine 0.93), and only 18% of German tickets got any
 English hit in their top 5. Yet for German tickets the best *English* precedents are at least as useful as German ones
-(top-1 queue match 56.8% English-only vs 51.6% German-only). So `retrieve()` keeps
+(top-1 queue match 55.3% English-only vs 50.1% German-only). So `retrieve()` keeps
 the 3 best hits overall and gives the last 2 slots (`CROSS_LINGUAL_SLOTS`, default 2) to the best tickets in the language
 missing from those 3. Hits stay sorted by their real score, so the top hit, and with it the gate's `SIM_THRESHOLD`, never
 changes. The reply is still written in the ticket's language. Set `CROSS_LINGUAL_SLOTS=0` to turn it off.
 Example: a German hospital VPN outage now also retrieves TKT-26021 "Severe Service Disruption Detected in EMR Platform".
 
-**Quality** (validation tickets without a word-for-word copy in train, n=2,869, searched against the train index;
+**Quality** (validation tickets without a word-for-word copy in the train index, n=2,942, searched against it;
 `scripts/tune_threshold.py`, `scripts/cross_lingual.py`):
 
 | | Top-1 queue | Queue in top 5 | Type in top 5 | Has a hit in the other language |
 |---|---|---|---|---|
-| All, without cross-lingual mix | 68.4% | 85.6% | 97.3% | 12% |
-| **All, with mix (default)** | **68.4%** | **88.5%** | **97.9%** | **100%** |
-| English (n=2,015), with mix | 73.7% | 89.6% | 98.1% | 100% |
-| German (n=854), with mix | 56.0% | 85.8% | 97.5% | 100% |
+| All, without cross-lingual mix | 65.6% | 84.1% | 96.9% | 12% |
+| **All, with mix (default)** | **65.6%** | **86.5%** | **97.7%** | **100%** |
+| English (n=2,070), with mix | 70.4% | 87.3% | 97.8% | 100% |
+| German (n=872), with mix | 54.0% | 84.4% | 97.4% | 100% |
 
-The mix helps German tickets most: queue in top 5 rises from 79.9% to 85.8% (English: 88.1% to 89.6%).
+The mix helps German tickets most: queue in top 5 rises from 79.1% to 84.4% (English: 86.2% to 87.3%).
 
-Including the 995 val tickets that do have a copy in train raises top-1 queue match to 76.1%; that gap is the copies, not
+Including the 922 val tickets that do have a copy in the index raises top-1 queue match to 73.5%; that gap is the copies, not
 better retrieval, so we quote the lower number. Higher scores mean better precedents: top-1 queue match rises from 43% in
 the lowest tenth of scores to 98% in the highest.
 
-**`SIM_THRESHOLD = 0.85`** (no real precedent → escalate). Tuned with `scripts/tune_threshold.py`:
+**`SIM_THRESHOLD`** (no real precedent → escalate; `config.py` has 0.85). Tuned with `scripts/tune_threshold.py`:
 - Dataset tickets are long and uniform in style and score high (99% above 0.88). Short tickets typed live score lower
-  (0.856-0.901 for 19 hand-typed routine tickets) and overlap with off-topic text (0.785-0.874 for 17 off-topic tickets).
+  (0.852-0.901 for 19 hand-typed routine tickets) and overlap with off-topic text (0.785-0.874 for 17 off-topic tickets).
   A threshold tuned on dataset tickets alone (~0.89) would escalate 15 of the 19 routine tickets.
-- Rule: the highest threshold that escalates none of the hand-typed routine tickets (0.855), minus a 0.005 margin.
+- Rule: the highest threshold that escalates none of the hand-typed routine tickets, minus a 0.005 margin. On the current
+  index (generic answers removed) that gives **0.845**; 0.85 still escalates none of them but with only 0.0016 to spare.
 
 | Threshold | Val tickets escalated | Hand-typed routine escalated | Off-topic caught |
 |---|---|---|---|
-| **0.85** | 0% | 0 / 19 | 12 / 17 |
-| 0.875 | 0.6% | 6 / 19 | 17 / 17 |
-| 0.89 | 3.4% | 15 / 19 | 17 / 17 |
+| **0.845** (recommended) | 0% | 0 / 19 | 14 / 17 |
+| 0.85 (current) | 0.07% | 0 / 19 | 14 / 17 |
+| 0.875 | 0.7% | 9 / 19 | 17 / 17 |
+| 0.89 | 4.1% | 15 / 19 | 17 / 17 |
 
-Not caught at 0.85: "???" and keyboard mash (they score like real short tickets, so similarity cannot catch them; the
-gate needs its own too-few-words rule, S4), and two off-topic questions (recipe, gardening) at 0.852, which the generation
-prompt must refuse because no precedent addresses them.
+Not caught at 0.845-0.85: "???" and keyboard mash. They score like real short tickets, so similarity cannot catch them;
+the gate's `UNREADABLE` / `EMPTY_TICKET` rules do. (Removing generic answers also raised off-topic catches from 12 to 14.)
 
 **Speed** (100 holdout queries, `retrieve()` with the cross-lingual mix, including query embedding):
 
@@ -252,10 +260,10 @@ then CPU; override with `EMBED_DEVICE`). Call `warmup()` at app start so the fir
 would be slow on CPU); download the e5 weights (~1.1 GB) during the Docker build; give the service at least 4 GiB of memory.
 
 **Limitations**
-- German is weaker than English (top-1 queue 56.0% vs 73.7%).
+- German is weaker than English (top-1 queue 54.0% vs 70.4%).
 - Short live tickets score lower than dataset tickets, so the score scale differs between live input and the dataset.
-- Some tickets with generic answers sit close to many vague queries. TKT-07586 (answer: "could you please provide more
-  details…") often fills a cross-lingual slot for vague German tickets; it is not a real resolution.
+- The KB answers are synthetic and often vague even after removing generic ones (e.g. "Examine the issue and contact the
+  provided information"), and some topics have no good precedent (a printer that is offline finds unrelated tickets).
 - Similarity cannot tell garbage input from short real tickets; that needs a separate gate rule.
 - Validation and holdout contain word-for-word copies of KB tickets (about a quarter), which inflates scores that include them.
 
