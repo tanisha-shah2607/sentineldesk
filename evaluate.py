@@ -25,16 +25,21 @@ Inputs go through the pipeline (subject/body only). Labels are loaded separately
 """
 import argparse
 import json
+import os
 import time
 
 import numpy as np
 from sklearn.metrics import f1_score
 
-from src.config import RESULTS_DIR, TARGETS
-from src.data import holdout_seen_ids, load_test_inputs, load_test_labels
-from src.gate import decide
-from src.pipeline import run_ticket
-from src.retrieval import retrieve_batch
+# Strict mode: stage C must RAISE on a stage error instead of silently substituting a mock,
+# otherwise the generation numbers would be measured on fake data.
+os.environ.setdefault("SENTINELDESK_STRICT", "1")
+
+from src import pipeline  # noqa: E402
+from src.config import RESULTS_DIR, TARGETS  # noqa: E402
+from src.data import holdout_seen_ids, load_test_inputs, load_test_labels  # noqa: E402
+from src.gate import decide  # noqa: E402
+from src.retrieval import retrieve_batch  # noqa: E402
 from src.text import build_text
 from src.triage import triage_batch
 
@@ -103,9 +108,14 @@ def main(n_cls: int | None, n_gen: int):
         res[f"{name}_retrieval_anyk_type_match"] = _rate(anyk_t, sel)
 
     # ---- Stage C: end-to-end generation (sample)
-    lats, warn, fb, bad_cite = [], [], [], []
+    lats, warn, fb, bad_cite, stage_status = [], [], [], [], {}
     for s, b in items[:n_gen]:
-        r = run_ticket(s, b)
+        if hasattr(pipeline, "run_ticket_verbose"):
+            r, status = pipeline.run_ticket_verbose(s, b)
+            for k, v in status.items():
+                stage_status.setdefault(k, set()).add(v)
+        else:
+            r = pipeline.run_ticket(s, b)
         lats.append(r["latency"]["total_ms"])
         d, ids = r["draft"], {h["ticket_id"] for h in r["hits"]}
         warn.append(bool(d["warnings"]))
@@ -116,6 +126,14 @@ def main(n_cls: int | None, n_gen: int):
                     "gen_warning_rate": float(np.mean(warn)), "gen_fallback_rate": float(np.mean(fb)),
                     "latency_p50_ms": float(np.percentile(lats, 50)),
                     "latency_p95_ms": float(np.percentile(lats, 95))})
+        res["gen_stage_status"] = {k: sorted(v) for k, v in stage_status.items()}
+        mocked = {k: sorted(v) for k, v in stage_status.items() if v != {"live"}}
+        if mocked:
+            res["WARNING_mock_stages_used"] = mocked
+            print(f"\n*** WARNING: stage C used mocks {mocked}; generation numbers are NOT real ***\n")
+        if res["gen_fallback_rate"] > 0:
+            print(f"NOTE: {res['gen_fallback_rate']:.0%} of sampled drafts used the template fallback "
+                  "(no live LLM); citation/warning rates then describe the template, not the model.")
 
     def fmt(v):
         return f"{v:.3f}" if isinstance(v, float) else v
