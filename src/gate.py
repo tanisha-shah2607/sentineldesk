@@ -69,21 +69,27 @@ UNSUPPORTED_TOPICS: list[tuple[str, re.Pattern, re.Pattern]] = [
                 r"r[üu]ckerstatt\w*|erstatt\w*|geld zur[üu]ck|entsch[äa]dig\w*|gutschrift\w*)", _F),
      re.compile(r"\b(refund\w*|reimburs\w*|compensat\w*|credit note|r[üu]ckerstatt\w*|erstatt\w*|"
                 r"entsch[äa]dig\w*|gutschrift\w*)", _F)),
+    # "quote" needs a word end (German "Engagement-Quoten" is not a quote request). "Angebot" only as the whole
+    # word: "angebotenen" / "Angebote" (offered / offerings) matched 220 ordinary KB tickets; 37 real asks remain.
     ("specific pricing or discount",
-     re.compile(r"\b(how much (does|will|would|is)|price\w*|pricing|quote|quotation|discount\w*|"
-                r"cost (of|for)|preis\w*|kosten f[üu]r|rabatt\w*|angebot\w*|(was|wie ?viel) kostet)", _F),
+     re.compile(r"\b(how much (does|will|would|is)|price\w*|pricing|quotes?\b|quotations?\b|discount\w*|"
+                r"cost (of|for)|preis\w*|kosten f[üu]r|rabatt\w*|angebot\b|kostenvoranschl\w*|(was|wie ?viel) kostet)", _F),
      re.compile(r"(\b(price\w*|pricing|discount\w*|preis\w*|rabatt\w*)\b|[€$£]\s?\d|\d\s?(€|eur|usd)\b)", _F)),
-    ("guarantee or SLA commitment",
-     re.compile(r"\b(guarantee\w*|warrant(y|ies)|sla\b|service level|uptime commitment|"
+    ("guarantee or SLA commitment",  # an "SLA dashboard/report" question asks for no commitment
+     re.compile(r"\b(guarantee\w*|warrant(y|ies)|sla\b(?![- ](?:dashboard|report\w*|metric\w*|monitor\w*|status))|"
+                r"service level|uptime commitment|"
                 r"garantie\w*|garantier\w*|zusicher\w*|gew[äa]hrleist\w*)", _F),
      re.compile(r"\b(guarantee\w*|warrant(y|ies)|sla\b|service level|garantie\w*|garantier\w*|"
                 r"gew[äa]hrleist\w*)", _F)),
 ]
 
+# "court" only in legal phrasing (not "food court" or a court-booking app). "gericht" excludes "gerichtet(e)"
+# ("directed at"), which made up 11 of the 12 KB tickets the old "gericht\w*" matched.
 LEGAL_PATTERN = re.compile(
-    r"\b(lawsuit|sue (you|your)|legal action|lawyer|attorney|court|liabilit\w*|litigation|"
+    r"\b(lawsuit|sue (you|your)|legal action|lawyer|attorney|(?:to|in|into|before) court|"
+    r"court (?:order|case|action|claim|proceedings?|hearing)|liabilit\w*|litigation|"
     r"breach of contract|small claims|"
-    r"anwalt|rechtsanwalt|klage\w*|verklagen|gericht\w*|rechtliche schritte|haftung\w*)\b", _F)
+    r"anwalt|rechtsanwalt|klage\w*|verklagen|gericht(?!et)\w*|rechtliche schritte|haftung\w*)\b", _F)
 
 # Security incidents (S1/S2 request). Deliberately narrow: bare "encrypt" / "verschlüssel" do NOT match,
 # because encryption questions are routine. "breach of contract" is LEGAL's job and "SLA breach" is an
@@ -99,7 +105,12 @@ INJECTION_PATTERN = re.compile(
     r"disregard (all |any )?(the )?(previous|prior|above|your) (instructions|rules)|"
     r"forget (all |your )?(previous )?instructions|"
     r"(reveal|print|show|repeat) (me )?(your|the) (system )?prompt|system prompt|"
-    r"you are now (a|an|in)\b|act as (a|an) |developer mode|jailbreak|"
+    r"you are now (a|an|in)\b|"
+    # "act as a ..." only as an order to the assistant (start of a line/sentence, or "you (will) act as"),
+    # not "can the gateway act as a proxy"; "developer mode" only together with dropping rules/restrictions.
+    r"(?:(?:^|[\n.!?:])\s*|\byou\s+(?:will\s+|must\s+|should\s+|shall\s+|now\s+)?)act as (?:a|an)\b|"
+    r"developer mode\b(?=[^.!?\n]*\b(?:ignore|unrestricted|uncensored|no (?:restrictions|rules|filters|limits)|"
+    r"without (?:any )?(?:restrictions|rules|filters))\b)|jailbreak|"
     r"ignoriere (alle )?(vorherigen|bisherigen|obigen) (anweisungen|regeln)|"
     r"vergiss (alle )?(vorherigen )?anweisungen|systemprompt|system-prompt)", _F)
 

@@ -187,3 +187,34 @@ def test_long_uncited_advice_with_handoff_words_is_not_a_handoff(fake_llm):
     fake_llm.text = "Hello. " + "Please reinstall the driver and reboot the machine. " * 15 + "A specialist will follow up."
     out = draft_reply("VPN", "drops", "en", HITS)
     assert out["abstained"] is False and any("cites no" in w for w in out["warnings"])
+
+
+# --- S5 code review (fixed by S2 for S4) ------------------------------------------------------------------
+def test_removing_a_bad_id_keeps_a_longer_valid_id():
+    hits = [{"ticket_id": "TKT-00012", "score": 0.9, "subject": "VPN", "language": "en",
+             "answer": "Update the VPN client to the latest version and reconnect to the gateway."}]
+    out = validate_draft("Please update the client [TKT-0001] and reconnect [TKT-00012].", hits, "en")
+    assert "[TKT-00012]" in out["text"] and out["cited_ids"] == ["TKT-00012"]
+    assert "TKT-0001]" not in out["text"].replace("TKT-00012]", "")
+
+
+def test_is_resolution():
+    assert not gen.is_resolution("To better assist you, could you please provide more details about the "
+                                 "issue you are facing?")   # TKT-07586
+    assert not gen.is_resolution("call")
+    assert not gen.is_resolution("Bitte geben Sie weitere Details zum Problem an.")
+    assert not gen.is_resolution(None)
+    assert gen.is_resolution(HITS[0]["answer"])
+    long_with_request = ("Restart the VPN service on the gateway, renew the client certificate in the portal and "
+                         "reconnect. If the problem persists, please provide more details about the error.")
+    assert gen.is_resolution(long_with_request)
+
+
+def test_non_resolutions_are_never_cited(monkeypatch):
+    monkeypatch.setattr(gen, "llm_available", lambda: False)
+    generic = {"ticket_id": "TKT-07586", "score": 0.95, "subject": "Issue", "language": "en",
+               "answer": "To better assist you, could you please provide more details about the issue you are facing?"}
+    out = draft_reply(None, "My VPN keeps dropping", "en", [generic, *HITS])
+    assert "TKT-07586" not in out["text"] and out["cited_ids"][0] == "TKT-00101"
+    only_generic = draft_reply(None, "My VPN keeps dropping", "en", [generic])
+    assert only_generic["cited_ids"] == [] and "TKT-07586" not in only_generic["text"]

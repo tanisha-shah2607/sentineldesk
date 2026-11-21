@@ -20,6 +20,8 @@ Hallucination control, in order:
      with money amounts / percentages / deadlines / refund / guarantee / SLA claims that the evidence
      does not support, flags a missing citation and a wrong reply language. Each fix adds a warning.
   4. If the LLM is unavailable or fails, template_fallback() quotes the top precedent verbatim.
+Precedents whose answer resolves nothing (is_resolution() is False) are dropped first, so neither the LLM
+nor the template can cite them.
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ import re
 
 from .llm import LLMError, llm_available, llm_complete
 from .pii import mask_pii
+from .text import unescape
 
 MAX_ANSWER_CHARS = 1500
 LANG_NAME = {"en": "English", "de": "German"}
@@ -133,8 +136,8 @@ def _unsupported_claims(sentence: str, evidence: str, evidence_digits: set[str])
 
 
 def _strip_ids(text: str, bad: set[str]) -> str:
-    for b in bad:
-        text = re.sub(rf"\s?\[?{re.escape(b)}\]?", "", text)
+    for b in bad:  # (?!\d): removing a bad "TKT-0001" must not eat the start of a valid "TKT-00012"
+        text = re.sub(rf"\s?\[?{re.escape(b)}(?!\d)\]?", "", text)
     text = re.sub(r"\[\s*[,;]?\s*\]", "", text)          # emptied brackets
     text = re.sub(r"\[\s*[,;]\s*", "[", text)
     text = re.sub(r"\s*[,;]\s*\]", "]", text)
@@ -250,12 +253,36 @@ def template_fallback(lang: str, hits: list[dict], llm_error: str | None = None)
 
 
 # ----------------------------------------------------------------------------------------------
+# Which precedents count as resolutions
+# ----------------------------------------------------------------------------------------------
+# Some KB answers resolve nothing: a bare request for details, e.g. TKT-07586 "To better assist you, could
+# you please provide more details about the issue you are facing?", or a stub such as "call" / "Sorry".
+# In the clean KB, 265 answers are under 40 characters and 447 short ones (under 160) only ask for details.
+# Longer answers that end by asking for details still carry real steps, so they stay.
+MIN_RESOLUTION_CHARS = 40
+DETAIL_REQUEST_MAX_CHARS = 160
+DETAIL_REQUEST_RE = re.compile(
+    r"(provide (us with )?(more|additional|further) (details|information)|"
+    r"share (more|additional|further) (details|information)|"
+    r"(more|additional|further) (details|information) (is |are )?(needed|required)|"
+    r"(weitere|mehr|zusätzliche|genauere) (details|informationen|angaben))", _F)
+
+
+def is_resolution(answer) -> bool:
+    """False for answers that resolve nothing (stubs and short requests for more details)."""
+    a = unescape(answer).strip()
+    if len(a) < MIN_RESOLUTION_CHARS:
+        return False
+    return not (len(a) < DETAIL_REQUEST_MAX_CHARS and DETAIL_REQUEST_RE.search(a))
+
+
+# ----------------------------------------------------------------------------------------------
 # Entry point
 # ----------------------------------------------------------------------------------------------
 
 def draft_reply(subject, body, lang: str, hits: list[dict]) -> dict:
     lang = "de" if lang == "de" else "en"
-    hits = [h for h in (hits or []) if h.get("ticket_id")][:_max_precedents()]
+    hits = [h for h in (hits or []) if h.get("ticket_id") and is_resolution(h.get("answer"))][:_max_precedents()]
     if not hits:
         return template_fallback(lang, [], "no precedents retrieved")
     if not llm_available():
