@@ -94,6 +94,12 @@ def main(n_cls: int | None, n_gen: int):
     hits = retrieve_batch(texts)
     gates = [decide(p, h, tx) for p, h, tx in zip(preds, hits, texts)]
     esc = np.array([g["escalate"] for g in gates])
+    # which gate rule fired (S4's decide() returns machine-readable codes); a ticket can fire several
+    code_counts = {}
+    for g in gates:
+        for c in g.get("codes", []):
+            code_counts[c] = code_counts.get(c, 0) + 1
+    res["gate_rule_share_of_tickets"] = {c: round(n / len(gates), 3) for c, n in sorted(code_counts.items())}
     q, ty = labels["queue"].values, labels["type"].values
     q_ok = np.array([p["queue"] == a for p, a in zip(preds, q)])
     top1_q = np.array([bool(h) and h[0]["queue"] == a for h, a in zip(hits, q)])
@@ -108,7 +114,7 @@ def main(n_cls: int | None, n_gen: int):
         res[f"{name}_retrieval_anyk_type_match"] = _rate(anyk_t, sel)
 
     # ---- Stage C: end-to-end generation (sample)
-    lats, warn, fb, bad_cite, stage_status = [], [], [], [], {}
+    lats, warn, fb, bad_cite, stage_status, abst, llm_errs = [], [], [], [], {}, [], {}
     for s, b in items[:n_gen]:
         if hasattr(pipeline, "run_ticket_verbose"):
             r, status = pipeline.run_ticket_verbose(s, b)
@@ -118,12 +124,18 @@ def main(n_cls: int | None, n_gen: int):
             r = pipeline.run_ticket(s, b)
         lats.append(r["latency"]["total_ms"])
         d, ids = r["draft"], {h["ticket_id"] for h in r["hits"]}
-        warn.append(bool(d["warnings"]))
+        warn.append(bool(d["warnings"]))          # real grounding failure (DRAFT_GROUNDING)
+        abst.append(bool(d.get("abstained")))     # correct refusal / hand-off (DRAFT_HANDOFF): NOT a failure
         fb.append(bool(d["used_fallback"]))
+        if d.get("llm_error"):
+            e = str(d["llm_error"])[:60]
+            llm_errs[e] = llm_errs.get(e, 0) + 1
         bad_cite.append(any(c not in ids for c in d["cited_ids"]))
     if lats:
         res.update({"gen_sample_n": len(lats), "gen_invalid_citation_rate": float(np.mean(bad_cite)),
-                    "gen_warning_rate": float(np.mean(warn)), "gen_fallback_rate": float(np.mean(fb)),
+                    "gen_grounding_failure_rate": float(np.mean(warn)),
+                    "gen_abstain_rate": float(np.mean(abst)),
+                    "gen_fallback_rate": float(np.mean(fb)), "gen_llm_errors": llm_errs,
                     "latency_p50_ms": float(np.percentile(lats, 50)),
                     "latency_p95_ms": float(np.percentile(lats, 95))})
         res["gen_stage_status"] = {k: sorted(v) for k, v in stage_status.items()}
