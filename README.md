@@ -394,6 +394,11 @@ true Incident+high tickets are escalated (full trade-off table above; S2 reprodu
 loaders used outside scoring scripts; no holdout ticket ids in models/ or index/; 793 distinct ids returned from 200 holdout
 queries, all from the KB.
 
+**Adversarial set (`python scripts/run_adversarial.py`, strict mode, real triage + e5 index + Groq gpt-oss-120b): 22/22 pass.**
+No stage was a mock, so every check ran on the real pipeline. 17 of 22 drafts came from the live model and 5 used the template
+fallback (Groq free-tier rate limits), so for those 5 the "forbid" checks tested the template, not the model. `pytest`: 178 passed,
+2 expected failures (two-word English tickets can be detected as German).
+
 **Not measured (be upfront in Q&A):** the end-to-end retrieval hit rates, gate escalation rate and *escalated* High-Priority
 Incident recall over the full holdout, and the 50-ticket generation sample, were not completed before submission (the
 full-holdout retrieval run on a CPU-only laptop was too slow). `python evaluate.py --n-gen 50` produces them on a machine
