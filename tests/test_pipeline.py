@@ -159,3 +159,14 @@ def test_grounding_escalation_keeps_gate_codes(monkeypatch):
     _patch_stage(monkeypatch, "gate", lambda t, h, x: {"escalate": False, "reasons": [], "codes": []})
     g = P.run_ticket("s", "b")["gate"]
     assert g["escalate"] and g["codes"] == ["DRAFT_GROUNDING"] and len(g["reasons"]) == 1
+
+
+def test_handoff_escalates_with_its_own_code(monkeypatch):
+    def handoff(subject, body, lang, hits):
+        return {"text": "Forwarding to a specialist.", "cited_ids": [], "warnings": [],
+                "used_fallback": False, "abstained": True}
+    _patch_stage(monkeypatch, "generate", handoff)
+    _patch_stage(monkeypatch, "gate", lambda t, h, x: {"escalate": False, "reasons": [], "codes": []})
+    r = P.run_ticket("s", "b")
+    assert r["gate"]["codes"] == ["DRAFT_HANDOFF"] and r["draft"]["for_review"]
+    assert validate_result(r) == []
