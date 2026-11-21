@@ -57,5 +57,13 @@ C. Generation: `run_ticket` on a stated sample (`--n-gen`, default 50): citation
 **High-Priority Incident Recall** (headline): of holdout tickets whose true label is Incident + high, the fraction the system
 escalates to a human. We also report the classifier version: the fraction for which triage predicts both labels correctly.
 
+## Checks to run before merging your module / before the demo
+- `python scripts/run_adversarial.py`: 20 tricky tickets in `eval/adversarial.json` (empty subject, prompt injection,
+  fake refund/SLA/price/integration asks, legal threat, PII, unsafe advice, French, garbage, 400x-long body). Checks:
+  no crash, escalation expectation, language, no forbidden claims in the draft, cited ids were retrieved.
+  Note: with the stubs everything escalates, so most cases pass trivially; it only becomes meaningful with real modules.
+- `python scripts/leakage_audit.py`: disk (no holdout answers), static scan (who touches holdout files/loaders),
+  models/ and index/ contain no holdout ticket ids, retrieval returns only KB ids. Exits 1 on any FAIL.
+
 ## Results
 _S1 fills in after `python evaluate.py`._
