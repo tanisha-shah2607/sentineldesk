@@ -73,11 +73,12 @@ escalates to a human. We also report the classifier version: the fraction for wh
 |---|---|---|
 | `HIGH_INCIDENT` | predicted `priority == high` and `type == Incident` | the brief's mandatory rule |
 | `LOW_CONFIDENCE` | `overall_conf < CONF_THRESHOLD` | threshold in `config.py`, tuned on the `val` slice |
-| `NO_PRECEDENT` | no hits, or top similarity `< SIM_THRESHOLD` | the score scale comes from S3's index |
+| `NO_PRECEDENT` | no hits, or top similarity `< SIM_THRESHOLD` (0.85) | 0.85 comes from S3's `scripts/tune_threshold.py`: e5 scores sit in ~0.75-0.95, and 0.85 flags no hand-typed in-scope ticket while catching 12/17 off-topic ones |
 | `UNSUPPORTED_ASK` | ticket asks for a refund/compensation, a price/discount, or a guarantee/SLA, and no retrieved answer covers that topic | en + de keyword patterns |
 | `LEGAL` | legal threat or legal commitment (lawsuit, lawyer, *Anwalt*, *Klage* ...) | always a human |
 | `PROMPT_INJECTION` | "ignore previous instructions", "system prompt", *"ignoriere alle vorherigen Anweisungen"* ... | |
 | `EMPTY_TICKET` | body under 15 characters | |
+| `UNREADABLE` | no recognisable English/German word or IT term (keyboard mash, symbols, digits only) | similarity can't catch garbage: it scores like real short tickets |
 
 After generation, any draft `warning` also escalates the ticket (see `pipeline.py`).
 

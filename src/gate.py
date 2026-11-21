@@ -15,6 +15,8 @@ Rules (any one fires -> escalate). Every rule is a pure function of its inputs.
   LEGAL             legal threat or legal commitment request (always a human)
   PROMPT_INJECTION  text tries to steer the assistant ("ignore previous instructions", ...)
   EMPTY_TICKET      body too short to triage
+  UNREADABLE        garbage or keyboard mash: no recognisable English/German word. Retrieval cannot
+                    catch this (S3: "???" and mash score like real short tickets), so the gate does.
 """
 from __future__ import annotations
 
@@ -23,6 +25,36 @@ import re
 from .config import CONF_THRESHOLD, NO_SUBJECT, SIM_THRESHOLD
 
 MIN_TEXT_CHARS = 15
+MIN_LETTERS = 8
+
+# --- Readability (garbage / keyboard mash) -----------------------------------------------------
+# A real ticket, even a terse one ("VPN connection failure since update"), contains at least one
+# common English/German word or IT-support term. Keyboard mash and symbol strings contain none.
+_WORD = re.compile(r"[^\W\d_]{2,}")  # runs of 2+ unicode letters (umlauts and ß included)
+COMMON_WORDS = frozenset("""
+the an and or but if to of in on at by for from with without about into over after before since until
+during between is are was were be been am do does did done have has had can could will would should may
+might must not no yes it its this that these those there here what which who when where why how all any
+some each every more most other only same so than too very just also again still already yet me my mine
+we us our you your he him his she her they them their please thanks thank hello hi dear regards help need
+want like get got make made work working works use using used issue issues problem problems error errors
+question request urgent today yesterday since morning
+vpn login log logon password account user users access server servers network internet wifi email mail
+outlook system systems software hardware app application update upgrade install installed laptop computer
+pc printer phone device data database file files backup cloud service services connection connect
+connected down outage crash crashed slow fail failed failure broken invoice invoices billing bill payment
+payments charge charged refund price pricing subscription license licence order product products support
+ticket customer security breach report reset portal website site page browser integration api
+der die das den dem des ein eine einen einem einer und oder aber wenn dass zu von mit für auf im an bei
+nach seit vor über unter aus ist sind war waren wird werden hat haben hatte kann können konnte muss müssen
+soll sollte möchte möchten bitte danke hallo guten tag sehr geehrte geehrter ich mich mir mein meine
+meinen wir uns unser unsere sie ihr ihre ihnen es er nicht kein keine keinen noch schon auch nur wie was
+warum wann wo welche dieser diese dieses hier dort gibt geht läuft funktioniert probleme fehler frage
+anfrage hilfe dringend heute gestern morgen
+zugang passwort konto benutzer netzwerk rechner drucker anwendung daten datei dateien sicherung
+verbindung ausfall störung absturz langsam rechnung zahlung abrechnung rückerstattung erstattung preis
+lizenz bestellung produkt kunde kunden sicherheit seite
+""".split())
 
 # --- Unsupported-action detection -------------------------------------------------------------
 # Each topic: (label, request pattern in the ticket, evidence pattern in retrieved answers).
@@ -123,6 +155,16 @@ def rule_empty(text: str):
     return None
 
 
+def rule_unreadable(text: str):
+    t = text.replace(NO_SUBJECT, "").strip()
+    if len(t) < MIN_TEXT_CHARS:  # EMPTY_TICKET already covers it; don't report twice
+        return None
+    words = [w.lower() for w in _WORD.findall(t)]
+    if sum(map(len, words)) < MIN_LETTERS or not any(w in COMMON_WORDS for w in words):
+        return "UNREADABLE", "Ticket text has no recognisable words (garbage or keyboard mash)"
+    return None
+
+
 def decide(triage_out: dict, hits: list[dict], text: str) -> dict:
     tri = triage_out or {}
     hits = hits or []
@@ -130,6 +172,7 @@ def decide(triage_out: dict, hits: list[dict], text: str) -> dict:
     fired = [r for r in (
         rule_high_incident(tri),
         rule_empty(text),
+        rule_unreadable(text),
         rule_prompt_injection(text),
         rule_legal(text),
         rule_unsupported_ask(text, hits),
