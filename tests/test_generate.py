@@ -187,3 +187,65 @@ def test_long_uncited_advice_with_handoff_words_is_not_a_handoff(fake_llm):
     fake_llm.text = "Hello. " + "Please reinstall the driver and reboot the machine. " * 15 + "A specialist will follow up."
     out = draft_reply("VPN", "drops", "en", HITS)
     assert out["abstained"] is False and any("cites no" in w for w in out["warnings"])
+
+
+# ---- review fixes (S5) -------------------------------------------------------------------------
+
+def test_removing_short_invalid_id_does_not_mangle_longer_valid_id():
+    hits = [{**HITS[0], "ticket_id": "TKT-12"}]
+    text = ("Hello. Please update the VPN client and reconnect [TKT-12]. See also [TKT-1]. "
+            "Best regards, the support team")
+    out = validate_draft(text, hits, "en")
+    assert "[TKT-12]" in out["text"] and "TKT-1]" not in out["text"].replace("[TKT-12]", "")
+    assert out["cited_ids"] == ["TKT-12"] and any("TKT-1" in w for w in out["warnings"])
+
+
+def test_validator_crash_falls_back_to_template(fake_llm, monkeypatch):
+    fake_llm.text = "Hello. Please update the VPN client [TKT-00101]. Best regards, the support team"
+    def boom(*a, **k):
+        raise ValueError("bug")
+    monkeypatch.setattr(gen, "validate_draft", boom)
+    out = draft_reply("VPN", "drops", "en", HITS)
+    assert out["used_fallback"] and out["warnings"] and "validator error" in out["llm_error"]
+
+
+def test_template_removes_placeholders_greeting_and_signoff():
+    hits = [{**HITS[0], "answer": ("Dear [Your Name],\n\nPlease restart the VPN client and reinstall the certificate "
+                                   "from the self-service portal. If it still fails, call us at <tel_num>. The new "
+                                   "certificate is valid for one year and renews automatically.\n\nKind regards,\n"
+                                   "[Support Team Name]")}]
+    text = template_fallback("en", hits)["text"]
+    for junk in ("[Your Name]", "<tel_num>", "Kind regards", "[Support Team Name]", "Dear", " at."):
+        assert junk not in text, junk
+    assert "Please restart the VPN client" in text
+
+
+def test_template_skips_generic_precedent():
+    generic = {**HITS[0], "ticket_id": "TKT-07586", "score": 0.95,
+               "answer": "To better assist you, could you please provide more details about the issue you are facing?"}
+    specific = {**HITS[1], "language": "en", "answer": (
+        "Please renew the VPN certificate in the self-service portal, then restart the client and sign in again. "
+        "If the connection still drops, remove the cached credentials and reconnect to the corporate network.")}
+    out = template_fallback("en", [generic, specific])
+    assert out["cited_ids"][0] == "TKT-00202" and "TKT-07586" not in out["cited_ids"]
+    assert "provide more details" not in out["text"]
+    only_generic = template_fallback("en", [generic])   # nothing better: still grounded on what we have
+    assert only_generic["cited_ids"] == ["TKT-07586"]
+
+
+def test_placeholders_never_reach_prompt_or_reply(fake_llm):
+    hits = [{**HITS[0], "answer": "Dear [name], please restart the router. Call <tel_num>. Regards, {name}"}]
+    p = build_prompt(None, "VPN drops", "en", hits)
+    assert "[name]" not in p and "tel_num" not in p and "{name}" not in p
+    fake_llm.text = ("Hello, please restart the router and reconnect [TKT-00101]. "
+                     "Best regards, [Your Name]")
+    out = draft_reply("VPN", "drops", "en", hits)
+    assert "[Your Name]" not in out["text"] and out["cited_ids"] == ["TKT-00101"]
+
+
+def test_phone_placeholder_cleanup_keeps_sentences_whole():
+    from src.generate import strip_placeholders
+    assert strip_placeholders("I am available to call at <tel_num> to discuss.") == "I am available to call to discuss."
+    assert strip_placeholders("If it fails, call us at <tel_num>.") == "If it fails, call us."
+    assert strip_placeholders("Rufen Sie uns unter [Telefonnummer] an.") == "Rufen Sie uns an."
+    assert strip_placeholders("Bitte rufen Sie uns unter <tel_num> an, wenn nötig.") == "Bitte rufen Sie uns an, wenn nötig."

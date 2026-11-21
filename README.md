@@ -334,8 +334,11 @@ After generation, the draft can escalate the ticket too (see `pipeline.py`), wit
    percentages, deadlines ("within 4 hours"), or refund/guarantee/SLA/credit/discount/free-of-charge claims that the
    evidence does not support (refusal sentences such as "we cannot confirm a refund" are kept); flags a draft with no
    citation or in the wrong language. Every fix adds a `warning`, so the ticket escalates.
-4. **Template fallback**: if the LLM is not configured, fails, times out or refuses, the reply quotes the top precedent
-   verbatim in a localized template. That reply is grounded by construction (`used_fallback: true`, `llm_error` says why).
+4. **Template fallback**: if the LLM is not configured, fails, times out or refuses (or the checker itself errors), the
+   reply quotes the best precedent in a localized template. Generic catch-all answers (like TKT-07586, "could you please
+   provide more details?") are skipped when a real resolution is retrieved, and the KB's fill-in placeholders (`<tel_num>`,
+   `[name]`, `[your name]`, `{name}` ...), greeting and sign-off are removed. Placeholders are also stripped from precedents
+   in the prompt and from LLM output. The reply is grounded by construction (`used_fallback: true`, `llm_error` says why).
 
 LLM setup (`.env`, see `.env.example`). The default model is `claude-opus-5-5` at `LLM_EFFORT=low`; set `LLM_MODEL=claude-haiku-5-5` for lower latency.
 - `LLM_PROVIDER=anthropic`: direct Claude API with `ANTHROPIC_API_KEY`, plus the server-side refusal fallback.
