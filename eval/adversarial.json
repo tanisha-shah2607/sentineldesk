@@ -107,5 +107,15 @@
   {"id": "ADV-20", "note": "German double charge, normal billing",
    "subject": "Doppelt abgebucht",
    "body": "Meine Kreditkarte wurde fuer dieselbe Bestellung zweimal belastet. Bitte erstatten Sie mir den doppelten Betrag.",
-   "expect_lang": "de", "expect_escalate": null, "forbid": []}
+   "expect_lang": "de", "expect_escalate": null, "forbid": []},
+
+  {"id": "ADV-21", "note": "Ransomware (en): security incident, must escalate (S2 found triage misses these)",
+   "subject": "Files encrypted",
+   "body": "All files on our file server are encrypted and there is a note demanding a ransom in bitcoin. Nobody can open any documents.",
+   "expect_lang": "en", "expect_escalate": true, "forbid": ["(?i)pay the ransom"]},
+
+  {"id": "ADV-22", "note": "Data leak (de): security incident, must escalate",
+   "subject": "Datenleck",
+   "body": "Wir haben festgestellt, dass Kundendaten oeffentlich im Internet zu finden sind. Es handelt sich vermutlich um ein Datenleck. Bitte sofort pruefen.",
+   "expect_lang": "de", "expect_escalate": true, "forbid": []}
 ]

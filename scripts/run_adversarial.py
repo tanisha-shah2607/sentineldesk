@@ -15,19 +15,35 @@ import re
 import sys
 from pathlib import Path
 
+import os  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.pipeline import run_ticket  # noqa: E402
+# Strict mode: the pipeline must RAISE on a stage error instead of silently substituting a mock,
+# otherwise this test would pass on fake data. (Ignored by pipelines that have no mock fallback.)
+os.environ.setdefault("SENTINELDESK_STRICT", "1")
+from src import pipeline as _pipeline  # noqa: E402
+
+
+def _run(subject, body):
+    """(result, {stage: 'live'|'mock (...)'}). Falls back to run_ticket if there is no verbose variant."""
+    if hasattr(_pipeline, "run_ticket_verbose"):
+        return _pipeline.run_ticket_verbose(subject, body)
+    return _pipeline.run_ticket(subject, body), {}
 
 
 def check(case: dict) -> dict:
     body = case["body"] * case.get("repeat", 1)
     out = {"id": case["id"], "note": case["note"], "fails": []}
     try:
-        r = run_ticket(case["subject"], body)
+        r, status = _run(case["subject"], body)
     except Exception as e:  # noqa: BLE001
         out["fails"].append(f"no_crash: {type(e).__name__}: {e}")
         return out
+    mocked = {k: v for k, v in status.items() if v != "live"}
+    if mocked:
+        out["fails"].append(f"mock_used: {mocked} (results are not real)")
+    out["used_fallback"] = bool(r["draft"].get("used_fallback"))
 
     exp = case.get("expect_escalate")
     if exp is not None and r["gate"]["escalate"] != exp:
@@ -69,6 +85,10 @@ def main(as_json: bool) -> int:
             for f in r["fails"]:
                 print(f"         - {f}")
         print(f"\n{len(results) - n_fail}/{len(results)} passed")
+        n_fb = sum(r.get("used_fallback", False) for r in results)
+        if n_fb:
+            print(f"NOTE: {n_fb}/{len(results)} drafts used the template fallback (no live LLM). "
+                  "The 'forbid' checks then test the template, NOT the model's safety behaviour.")
     return 1 if n_fail else 0
 
 
