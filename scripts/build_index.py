@@ -1,8 +1,10 @@
 """Owner: S3. Build the retrieval artifacts in index/ (gitignored).
 
 Usage: python scripts/build_index.py [--force]
-Step 4 (now): embed every clean KB ticket once and cache it (index/kb_emb.npy + kb_meta.parquet).
-Steps 5-6 (next): dedupe + FAISS indexes for part="train" and part="all" will be added here.
+  1. Embed every clean KB ticket once and cache it (index/kb_emb.npy + kb_meta.parquet). Skipped if
+     the cache for the current model exists; --force re-embeds.
+  2. Always rebuild both indexes from the cache (seconds): vecs_all (app) and vecs_train
+     (threshold tuning on part="val" queries). Re-run after any change to the val slice.
 Run scripts/make_split.py first.
 """
 import argparse
@@ -11,7 +13,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.retrieval import embed_kb  # noqa: E402
+from src.retrieval import PARTS, build_index, embed_kb  # noqa: E402
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
@@ -19,4 +21,6 @@ if __name__ == "__main__":
     a = ap.parse_args()
     t = time.perf_counter()
     embed_kb(force=a.force)
+    for part in PARTS:
+        build_index(part)
     print(f"Done in {time.perf_counter() - t:.0f}s")

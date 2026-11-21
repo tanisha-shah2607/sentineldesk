@@ -1,17 +1,27 @@
-"""Owner: S3. Replace the STUB bodies; keep signatures/shape.
+"""Owner: S3. Multilingual dense retrieval over the historical KB (exact cosine search).
 
-retrieve(text, k=5) -> [{
-  "ticket_id": "TKT-00012", "score": float (cosine, 0..1),
+Search is exact inner product on L2-normalised e5 vectors (same results as faiss.IndexFlatIP),
+done in NumPy. FAISS is not used: on macOS its wheel and torch's wheel each bundle libomp, and
+loading both aborts the process ("OMP: Error #15"). At ~33k vectors exact NumPy search is
+a few ms per query, so nothing is lost.
+
+retrieve(text, k=5, part="all") -> [{
+  "ticket_id": "TKT-00012", "score": float (cosine; e5 scores sit in a narrow high band, ~0.75-0.95),
   "subject": str, "answer": str, "snippet": str (answer[:300]),
   "queue": str, "type": str, "language": str
-}]  sorted by score desc
-retrieve_batch(texts, k) -> [list_of_hits, ...]   (evaluate.py runs this on the full holdout)
+}]  sorted by score desc; [] for empty text
+retrieve_batch(texts, k, part="all") -> [list_of_hits, ...]   (evaluate.py runs this on the full holdout)
 
 RULES:
   - Index load_kb_clean(need_answer=True) only (never anything from the holdout).
-  - Support two index builds: part="train" (for tuning SIM_THRESHOLD on part="val" queries, so a val
+  - Two index builds: part="train" (for tuning SIM_THRESHOLD on part="val" queries, so a val
     ticket never retrieves itself) and part="all" (the final index used by the app).
-  - e5-style query/passage prefixes live here; the input text comes from src.text.build_text.
+  - Duplicate bodies are collapsed to one ticket (lowest ticket_id) so top-k hits are distinct.
+  - e5 query/passage prefixes live here; the input text comes from src.text.build_text.
+
+Build: python scripts/build_index.py   (embeds once into index/, then builds both indexes)
+Tests/UI without an index: set RETRIEVAL_STUB=1 to get the fixed stub hit (conftest.py does this
+automatically when index/ has not been built).
 """
 from __future__ import annotations
 
@@ -26,12 +36,25 @@ from .text import build_text
 MODEL_NAME = os.getenv("EMBED_MODEL", "intfloat/multilingual-e5-base")
 QUERY_PREFIX, PASSAGE_PREFIX = "query: ", "passage: "   # required by e5 models
 BATCH_SIZE = 64
+SEARCH_CHUNK = 512        # queries per matrix multiply in retrieve_batch (caps memory at ~70 MB)
+SNIPPET_CHARS = 300
+PARTS = ("all", "train")
 
 EMB_PATH = INDEX_DIR / "kb_emb.npy"          # float32 (n, d), L2-normalised, row-aligned with META_PATH
 META_PATH = INDEX_DIR / "kb_meta.parquet"    # ticket_id, subject, answer, queue, type, language
 MODEL_TXT = INDEX_DIR / "model.txt"          # model that produced EMB_PATH
 META_COLS = ["ticket_id", "subject", "answer", "queue", "type", "language"]
 
+
+def _vec_path(part: str):
+    return INDEX_DIR / f"vecs_{part}.npy"
+
+
+def _meta_path(part: str):
+    return INDEX_DIR / f"meta_{part}.parquet"
+
+
+# ---------------------------------------------------------------- embedding
 
 def _device() -> str:
     """EMBED_DEVICE overrides; otherwise cuda > mps (Apple GPU) > cpu (e.g. Cloud Run)."""
@@ -60,11 +83,19 @@ def embed_texts(texts: list[str], is_query: bool = True, show_progress: bool = F
                            show_progress_bar=show_progress).astype(np.float32)
 
 
+def _cache_model() -> str | None:
+    return MODEL_TXT.read_text().strip() if MODEL_TXT.exists() else None
+
+
+def index_ready() -> bool:
+    """True if the embedding cache for MODEL_NAME exists (the search index can then be built in seconds)."""
+    return EMB_PATH.exists() and META_PATH.exists() and _cache_model() == MODEL_NAME
+
+
 def embed_kb(force: bool = False) -> None:
     """Step 4: embed every clean KB row with an answer ONCE and cache to INDEX_DIR.
     Keyed by ticket_id, so the train/all indexes are just subsets (no re-embedding)."""
-    if not force and EMB_PATH.exists() and META_PATH.exists() and MODEL_TXT.exists() \
-            and MODEL_TXT.read_text().strip() == MODEL_NAME:
+    if not force and index_ready():
         print(f"Embedding cache already exists ({EMB_PATH}); use --force to rebuild.")
         return
     from .data import load_kb_clean   # data access stays in src/data.py
@@ -83,22 +114,112 @@ def embed_kb(force: bool = False) -> None:
 def load_kb_embeddings() -> tuple[np.ndarray, "pd.DataFrame"]:  # noqa: F821
     """(embeddings, metadata) from the cache, row-aligned. For S3's index build and S2's classifier."""
     import pandas as pd
+    if not index_ready():
+        raise FileNotFoundError(f"No embedding cache for {MODEL_NAME} in {INDEX_DIR}. "
+                                "Run: python scripts/build_index.py")
     return np.load(EMB_PATH), pd.read_parquet(META_PATH)
 
 
-def build_index(part: str = "all") -> None:
-    """S3: embed load_kb_clean(need_answer=True, part=part) and persist to INDEX_DIR."""
-    raise NotImplementedError
+# ---------------------------------------------------------------- index
+
+def _dedupe_positions(meta) -> np.ndarray:
+    """Row positions to keep: one ticket per normalised body (`_body`), the lowest ticket_id.
+    `meta` must have a 0..n-1 RangeIndex so index labels are row positions."""
+    first = meta.sort_values("ticket_id").drop_duplicates("_body")
+    return np.sort(first.index.to_numpy())
 
 
-def retrieve(text: str, k: int = TOP_K) -> list[dict]:
-    # STUB: S3 replaces with FAISS search
-    return [{
-        "ticket_id": "TKT-00000", "score": 0.0, "subject": "(stub)",
-        "answer": "(stub answer)", "snippet": "(stub answer)", "queue": "Technical Support",
-        "type": "Incident", "language": "en",
-    }][:k]
+def build_index(part: str = "all") -> dict:
+    """Steps 5-6: select cached rows for `part`, drop duplicate bodies, and persist the
+    index (normalised vectors + row-aligned metadata) for exact cosine search."""
+    from .data import load_kb_clean   # data access stays in src/data.py
+    assert part in PARTS, part
+    emb, meta = load_kb_embeddings()
+
+    kb = load_kb_clean(need_answer=True, part=part)[["ticket_id", "body"]]
+    sel = meta["ticket_id"].isin(set(kb["ticket_id"])).to_numpy()
+    emb, meta = emb[sel], meta[sel].reset_index(drop=True)
+    body = meta[["ticket_id"]].merge(kb, on="ticket_id", how="left")["body"]
+    meta["_body"] = body.fillna("").str.replace(r"\s+", " ", regex=True).str.strip().str.lower().to_numpy()
+
+    keep = _dedupe_positions(meta)
+    emb = np.ascontiguousarray(emb[keep])
+    meta = meta.iloc[keep].drop(columns="_body").reset_index(drop=True)
+
+    np.save(_vec_path(part), emb)
+    meta.to_parquet(_meta_path(part), index=False)
+    _load.cache_clear()
+    stats = {"part": part, "selected": int(sel.sum()), "indexed": int(len(emb)),
+             "duplicates_dropped": int(sel.sum() - len(emb))}
+    print(f"Built {_vec_path(part).name}: {stats}")
+    return stats
 
 
-def retrieve_batch(texts: list[str], k: int = TOP_K) -> list[list[dict]]:
-    return [retrieve(t, k) for t in texts]
+@lru_cache(maxsize=len(PARTS))
+def _load(part: str):
+    """Load (vectors, metadata records) once per process. Builds the index from the embedding
+    cache if it is missing (seconds); never embeds the KB inside a request."""
+    import pandas as pd
+    assert part in PARTS, part
+    if not index_ready():
+        raise FileNotFoundError(f"No embedding cache for {MODEL_NAME} in {INDEX_DIR}. "
+                                "Run: python scripts/build_index.py")
+    if not (_vec_path(part).exists() and _meta_path(part).exists()):
+        build_index(part)
+    vecs = np.load(_vec_path(part))
+    meta = pd.read_parquet(_meta_path(part))
+    for c in META_COLS:                       # contract: plain str, never NaN/None (8.7% null subjects)
+        meta[c] = meta[c].fillna("").astype(str)
+    meta["snippet"] = meta["answer"].str[:SNIPPET_CHARS]
+    return vecs, meta[META_COLS + ["snippet"]].to_dict("records")
+
+
+def _top_k(vecs: np.ndarray, q: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """Exact top-k by inner product for each row of q. Returns (scores, ids), both (len(q), k)."""
+    k = min(k, len(vecs))
+    all_s, all_i = [], []
+    for start in range(0, len(q), SEARCH_CHUNK):
+        s = q[start:start + SEARCH_CHUNK] @ vecs.T
+        i = np.argpartition(-s, k - 1, axis=1)[:, :k]
+        top = np.take_along_axis(s, i, axis=1)
+        order = np.argsort(-top, axis=1, kind="stable")
+        all_i.append(np.take_along_axis(i, order, axis=1))
+        all_s.append(np.take_along_axis(top, order, axis=1))
+    return np.vstack(all_s), np.vstack(all_i)
+
+
+def warmup(part: str = "all") -> None:
+    """Load model + index and run one query so the first real request is fast (call at app start)."""
+    retrieve("warmup", k=1, part=part)
+
+
+# ---------------------------------------------------------------- search
+
+_STUB_HIT = {
+    "ticket_id": "TKT-00000", "score": 0.0, "subject": "(stub)",
+    "answer": "(stub answer)", "snippet": "(stub answer)", "queue": "Technical Support",
+    "type": "Incident", "language": "en",
+}
+
+
+def _stub_mode() -> bool:
+    return os.getenv("RETRIEVAL_STUB") == "1"
+
+
+def retrieve_batch(texts: list[str], k: int = TOP_K, part: str = "all") -> list[list[dict]]:
+    if _stub_mode():
+        return [[dict(_STUB_HIT)][:k] if t and t.strip() else [] for t in texts]
+    out: list[list[dict]] = [[] for _ in texts]
+    live = [i for i, t in enumerate(texts) if isinstance(t, str) and t.strip()]
+    if not live or k <= 0:
+        return out
+    vecs, records = _load(part)
+    q = embed_texts([texts[i] for i in live], is_query=True)
+    scores, ids = _top_k(vecs, q, k)
+    for row, i in enumerate(live):
+        out[i] = [{**records[j], "score": float(s)} for s, j in zip(scores[row], ids[row])]
+    return out
+
+
+def retrieve(text: str, k: int = TOP_K, part: str = "all") -> list[dict]:
+    return retrieve_batch([text], k=k, part=part)[0]
