@@ -1,0 +1,18 @@
+# Used by `gcloud run deploy --source .`. Without this file gcloud falls back to .gitignore, which excludes
+# models/ and index/, so the Docker build would fail ("models/triage.joblib missing").
+# Ship models/ and index/ (they are built locally); keep secrets, the dataset and junk out.
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ipynb_checkpoints
+.claude
+.env
+.streamlit/secrets.toml
+*.zip
+# the app does not need the dataset or old results (and the dataset must not be shipped)
+data/
+results/

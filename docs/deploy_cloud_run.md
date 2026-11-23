@@ -26,8 +26,13 @@ gcloud run deploy sentineldesk --source . --region <region> \
 - `--memory 4Gi`: the e5 model plus the 33k×768 index needs it (S3).
 - `--session-affinity`: Streamlit keeps each user's state (live queue, outage detector) in one container.
 - `--min-instances 1`: avoids a cold start (model load) during the demo.
-- API keys: use Secret Manager (`--set-secrets ANTHROPIC_API_KEY=<secret>:latest`), never `.env` in the image
+- API keys: use Secret Manager (for the Groq demo: `--set-secrets GROQ_API_KEY=<secret>:latest`, with
+  `LLM_PROVIDER=groq`; for Claude use `ANTHROPIC_API_KEY`), never `.env` in the image
   (`.dockerignore` excludes it). Ask S4 which provider/model the demo uses.
+- `.gcloudignore` (added by S1): without it, `gcloud run deploy --source .` would skip the gitignored `models/` and
+  `index/` and the build would fail on the "model missing" check. It excludes `data/`, `.env` and `results/`.
+- Rebuild the index from the cache right before deploying (`python scripts/build_index.py`, about 75 s): S3 changed what
+  goes in it (generic answers dropped), and `index_ready()` only checks the text-builder hash, not that.
 
 ## Notes
 - `EMBED_DEVICE=cpu` is set in the image. One query takes ~23 ms on CPU (S3's benchmark).
